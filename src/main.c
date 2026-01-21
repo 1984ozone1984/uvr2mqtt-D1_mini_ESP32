@@ -228,34 +228,34 @@ static pulse_type_t classify_pulse(uint32_t duration_us)
 /**
  * GPIO ISR - captures edge timestamps for DL-Bus decoding
  *
- * This runs on every edge (rising and falling) of the DL-Bus signal.
- * We calculate the pulse duration since the last edge and store it.
- * At ~1ms per pulse, the ISR has plenty of time to execute.
+ * Optimized for minimal latency:
+ * - No semaphore signaling (task polls instead)
+ * - Inline buffer write
+ * - Minimal branching
  */
 static void IRAM_ATTR gpio_isr_handler(void *arg)
 {
-    int64_t now = esp_timer_get_time();  // Microseconds
+    int64_t now = esp_timer_get_time();
     int level = gpio_get_level(DL_BUS_GPIO);
-
-    if (last_edge_time > 0) {
-        int64_t duration = now - last_edge_time;
-
-        // Only store valid pulses (filter out very short noise)
-        if (duration >= 100 && duration <= 50000) {
-            // Store the pulse that just ended (opposite of current level)
-            edge_buffer_put(&edge_buffer, (uint16_t)duration, !level);
-            stat_edges_received++;
-        }
-    }
+    int64_t prev = last_edge_time;
 
     last_edge_time = now;
-    last_level = level;
 
-    // Signal data available (from ISR)
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xSemaphoreGiveFromISR(edge_buffer.data_ready, &xHigherPriorityTaskWoken);
-    if (xHigherPriorityTaskWoken) {
-        portYIELD_FROM_ISR();
+    if (prev > 0) {
+        uint32_t duration = (uint32_t)(now - prev);
+
+        // Filter: valid pulses are 500-10000us (more tolerant range)
+        if (duration >= 500 && duration <= 10000) {
+            // Inline buffer write for speed
+            uint32_t head = edge_buffer.head;
+            uint32_t next = (head + 1) % EDGE_BUFFER_SIZE;
+            if (next != edge_buffer.tail) {  // Not full
+                edge_buffer.buffer[head].duration = (uint16_t)duration;
+                edge_buffer.buffer[head].level = !level;  // Level that just ended
+                edge_buffer.head = next;
+                stat_edges_received++;
+            }
+        }
     }
 }
 
@@ -276,8 +276,8 @@ static esp_err_t init_gpio_capture(void)
     };
     ESP_ERROR_CHECK(gpio_config(&io_conf));
 
-    // Install GPIO ISR service
-    ESP_ERROR_CHECK(gpio_install_isr_service(ESP_INTR_FLAG_IRAM));
+    // Install GPIO ISR service with high priority
+    ESP_ERROR_CHECK(gpio_install_isr_service(ESP_INTR_FLAG_IRAM | ESP_INTR_FLAG_LEVEL3));
 
     // Add handler for our GPIO
     ESP_ERROR_CHECK(gpio_isr_handler_add(DL_BUS_GPIO, gpio_isr_handler, NULL));
@@ -315,12 +315,10 @@ static void bit_extractor_task(void *arg)
     uint32_t bits_this_frame = 0;
 
     while (1) {
-        // Wait for data
-        if (xSemaphoreTake(edge_buffer.data_ready, pdMS_TO_TICKS(100)) != pdTRUE) {
-            // No data, check if there's anything in buffer anyway
-            if (edge_buffer_is_empty(&edge_buffer)) {
-                continue;
-            }
+        // Poll for data (more efficient than semaphore for continuous stream)
+        if (edge_buffer_is_empty(&edge_buffer)) {
+            vTaskDelay(1);  // Minimal delay when idle
+            continue;
         }
 
         // Process all available edges
