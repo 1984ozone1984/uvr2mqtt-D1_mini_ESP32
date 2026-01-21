@@ -1,0 +1,29 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+._*
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+
+# Temporary files
+*.tmp
+*.bak
+*~
+*.sb-*
+
+# Logs
+*.log
