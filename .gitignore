@@ -3,6 +3,10 @@
 .pioenvs/
 .piolibdeps/
 
+# Secrets (credentials)
+include/secrets.h
+
+
 # IDE
 .vscode/
 .idea/
@@ -27,3 +31,4 @@
 
 # Logs
 *.log
+*.txt

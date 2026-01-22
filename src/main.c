@@ -30,8 +30,48 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_rom_sys.h"
+#include "io_config.h"
 
 static const char *TAG = "DL-BUS";
+
+// =============================================================================
+// I/O Configuration Arrays (from Kconfig)
+// =============================================================================
+static const char *sensor_names[NUM_SENSORS] = SENSOR_NAMES;
+static const char *output_names[NUM_OUTPUTS] = OUTPUT_NAMES;
+static const char *speed_level_names[NUM_SPEED_LEVELS] = SPEED_LEVEL_NAMES;
+static const char *sensor_units[NUM_SENSOR_TYPES] = SENSOR_UNITS;
+
+// =============================================================================
+// Frame Byte Offsets (UVR1611 Protocol)
+// =============================================================================
+#define FRAME_OFF_DEVICE_ID     0
+#define FRAME_OFF_DEVICE_ID_INV 1
+#define FRAME_OFF_RESERVED      2
+#define FRAME_OFF_MINUTE        3
+#define FRAME_OFF_HOUR          4
+#define FRAME_OFF_DAY           5
+#define FRAME_OFF_MONTH         6
+#define FRAME_OFF_YEAR          7
+#define FRAME_OFF_SENSORS       8   // 16 sensors × 2 bytes = bytes 8-39
+#define FRAME_OFF_OUTPUTS_1     40  // Outputs A1-A8
+#define FRAME_OFF_OUTPUTS_2     41  // Outputs A9-A13
+#define FRAME_OFF_SPEED_A1      42
+#define FRAME_OFF_SPEED_A2      43
+#define FRAME_OFF_SPEED_A6      44
+#define FRAME_OFF_SPEED_A7      45
+#define FRAME_OFF_HEAT_REG      46  // Heat meter register
+#define FRAME_OFF_HEAT1         47  // Heat meter 1 (8 bytes)
+#define FRAME_OFF_HEAT2         55  // Heat meter 2 (8 bytes)
+#define FRAME_OFF_CHECKSUM      63
+
+// Sensor type codes (upper nibble of high byte)
+#define SENSOR_TYPE_UNUSED      0x00
+#define SENSOR_TYPE_DIGITAL     0x10
+#define SENSOR_TYPE_TEMP        0x20
+#define SENSOR_TYPE_FLOW        0x30
+#define SENSOR_TYPE_RADIATION   0x60
+#define SENSOR_TYPE_ROOM        0x70
 
 // =============================================================================
 // Hardware Configuration
@@ -563,44 +603,282 @@ static void manchester_decoder_task(void *arg)
 }
 
 // =============================================================================
+// Sensor/Output Parsing Functions
+// =============================================================================
+
+/**
+ * Get sensor type from high byte
+ * Type is encoded in bits 4-6 of the high byte
+ */
+static uint8_t get_sensor_type(uint8_t high_byte)
+{
+    return high_byte & 0x70;  // Mask bits 4-6
+}
+
+/**
+ * Get unit string for sensor type
+ */
+static const char* get_sensor_unit(uint8_t sensor_type)
+{
+    uint8_t idx = (sensor_type >> 4) & 0x07;
+    if (idx < NUM_SENSOR_TYPES) {
+        return sensor_units[idx];
+    }
+    return "";
+}
+
+/**
+ * Decode sensor value based on type
+ * Returns the value as a float, sets *valid to indicate if sensor is active
+ *
+ * Encoding per type:
+ * - Temperature (0x20): 12-bit signed value in low byte + bits 0-3 of high byte
+ * - Room sensor (0x70): 8-bit value in low byte only (bits 0-3 of high byte = mode)
+ * - Flow (0x30): 12-bit unsigned value × 4 l/h
+ * - Radiation (0x60): 12-bit unsigned value in W/m²
+ */
+static float decode_sensor_value(uint8_t low_byte, uint8_t high_byte, bool *valid)
+{
+    uint8_t sensor_type = get_sensor_type(high_byte);
+    *valid = (sensor_type != SENSOR_TYPE_UNUSED);
+
+    if (!*valid) {
+        return 0.0f;
+    }
+
+    switch (sensor_type) {
+        case SENSOR_TYPE_DIGITAL:
+            // Digital: bit 7 of high byte = ON/OFF
+            return (high_byte & 0x80) ? 1.0f : 0.0f;
+
+        case SENSOR_TYPE_TEMP: {
+            // Temperature: 12-bit signed value (low byte + bits 0-3 of high byte)
+            int16_t raw_value = low_byte | ((high_byte & 0x0F) << 8);
+            // Check sign bit (bit 7 of high byte indicates negative)
+            if (high_byte & 0x80) {
+                raw_value = raw_value - 4096;  // 12-bit two's complement
+            }
+            return raw_value / 10.0f;
+        }
+
+        case SENSOR_TYPE_ROOM: {
+            // Room sensor: 8-bit value in low byte only
+            // Bits 0-3 of high byte contain operating mode, not temperature data
+            // Bit 7 of high byte is sign bit
+            int16_t raw_value = low_byte;
+            if (high_byte & 0x80) {
+                raw_value = raw_value - 256;  // 8-bit two's complement
+            }
+            return raw_value / 10.0f;
+        }
+
+        case SENSOR_TYPE_FLOW:
+            // Flow rate: 12-bit unsigned × 4 l/h
+            return (low_byte | ((high_byte & 0x0F) << 8)) * 4.0f;
+
+        case SENSOR_TYPE_RADIATION:
+            // Radiation: 12-bit unsigned in W/m²
+            return (float)(low_byte | ((high_byte & 0x0F) << 8));
+
+        default:
+            return 0.0f;
+    }
+}
+
+/**
+ * Check if output is ON (from output state bytes)
+ */
+static bool is_output_on(const uint8_t *frame_data, int output_num)
+{
+    if (output_num < 1 || output_num > NUM_OUTPUTS) {
+        return false;
+    }
+
+    if (output_num <= 8) {
+        // Outputs A1-A8 in byte 40
+        return (frame_data[FRAME_OFF_OUTPUTS_1] >> (output_num - 1)) & 0x01;
+    } else {
+        // Outputs A9-A13 in byte 41
+        return (frame_data[FRAME_OFF_OUTPUTS_2] >> (output_num - 9)) & 0x01;
+    }
+}
+
+/**
+ * Decode speed level value
+ * Returns speed value (0-30), sets *active to indicate if speed control is active
+ */
+static int decode_speed_level(uint8_t speed_byte, bool *active)
+{
+    // Bit 5: 0 = active, 1 = inactive
+    *active = !(speed_byte & 0x20);
+    // Bits 0-4: speed value (0-30)
+    return speed_byte & 0x1F;
+}
+
+/**
+ * Decode heat meter power (instantaneous)
+ * Returns power in kW
+ */
+static float decode_heat_power(const uint8_t *heat_data)
+{
+    // Bytes 0-3: power in 1/100 kW (special encoding for byte 0)
+    uint32_t power_raw = heat_data[0] | (heat_data[1] << 8) |
+                         (heat_data[2] << 16) | (heat_data[3] << 24);
+    return power_raw / 100.0f;
+}
+
+/**
+ * Decode heat meter energy
+ * Returns total energy in kWh
+ */
+static float decode_heat_energy(const uint8_t *heat_data)
+{
+    // Bytes 4-5: kWh (1/10 kWh)
+    uint16_t kwh_raw = heat_data[4] | (heat_data[5] << 8);
+    // Bytes 6-7: MWh
+    uint16_t mwh = heat_data[6] | (heat_data[7] << 8);
+
+    return (mwh * 1000.0f) + (kwh_raw / 10.0f);
+}
+
+// =============================================================================
 // Frame Processing (Main Task)
 // =============================================================================
 
 static void print_frame(const dlbus_frame_t *frame)
 {
-    printf("\n========================================\n");
-    printf("DL-BUS FRAME (tick=%lu)\n", (unsigned long)frame->timestamp);
-    printf("========================================\n");
+    printf("\n==================== UVR1611 Frame #%lu ====================\n",
+           (unsigned long)stat_frames_valid);
 
-    // Print raw hex
-    printf("RAW (%d bytes):\n", frame->length);
-    for (int i = 0; i < frame->length; i++) {
-        printf("%02X ", frame->data[i]);
-        if ((i + 1) % 16 == 0) printf("\n");
+    // Timestamp
+    int minute = frame->data[FRAME_OFF_MINUTE];
+    int hour = frame->data[FRAME_OFF_HOUR] & 0x1F;
+    int dst = (frame->data[FRAME_OFF_HOUR] >> 5) & 1;
+    int day = frame->data[FRAME_OFF_DAY];
+    int month = frame->data[FRAME_OFF_MONTH];
+    int year = 2000 + frame->data[FRAME_OFF_YEAR];
+    printf("Timestamp: %04d-%02d-%02d %02d:%02d (DST: %s)\n",
+           year, month, day, hour, minute, dst ? "Yes" : "No");
+
+    // Device info
+    printf("Device ID: 0x%02X (%s)\n", frame->data[FRAME_OFF_DEVICE_ID],
+           frame->data[FRAME_OFF_DEVICE_ID] == 0x80 ? "Valid" : "Invalid");
+    printf("Checksum:  %s\n", frame->valid ? "OK" : "INVALID");
+
+    // ==========================================================================
+    // SENSORS
+    // ==========================================================================
+    printf("\nSENSORS:\n");
+    printf("--------\n");
+
+    for (int i = 0; i < NUM_SENSORS; i++) {
+        int byte_offset = FRAME_OFF_SENSORS + (i * 2);
+        uint8_t low_byte = frame->data[byte_offset];
+        uint8_t high_byte = frame->data[byte_offset + 1];
+
+        bool valid;
+        float value = decode_sensor_value(low_byte, high_byte, &valid);
+        uint8_t sensor_type = get_sensor_type(high_byte);
+        const char *unit = get_sensor_unit(sensor_type);
+
+        // Skip unused sensors (marked with "---")
+        if (strcmp(sensor_names[i], "---") == 0) {
+            continue;
+        }
+
+        printf("  S%-2d %-16s: ", i + 1, sensor_names[i]);
+
+        if (!valid || sensor_type == SENSOR_TYPE_UNUSED) {
+            printf("(unused)\n");
+        } else if (sensor_type == SENSOR_TYPE_DIGITAL) {
+            printf("%s\n", value > 0 ? "ON" : "OFF");
+        } else if (sensor_type == SENSOR_TYPE_TEMP || sensor_type == SENSOR_TYPE_ROOM) {
+            printf("%6.1f%s\n", value, unit);
+        } else if (sensor_type == SENSOR_TYPE_FLOW) {
+            printf("%6.0f%s\n", value, unit);
+        } else if (sensor_type == SENSOR_TYPE_RADIATION) {
+            printf("%6.0f%s\n", value, unit);
+        } else {
+            printf("%6.1f%s\n", value, unit);
+        }
     }
-    if (frame->length % 16 != 0) printf("\n");
 
-    // Key fields
-    printf("\nKey Fields:\n");
-    printf("  Device ID:     0x%02X %s\n", frame->data[0],
-           frame->data[0] == 0x80 ? "(UVR1611)" : "");
-    printf("  ID Inverted:   0x%02X %s\n", frame->data[1],
-           frame->data[1] == 0x7F ? "(OK)" : "(unexpected)");
-    printf("  Checksum:      %s\n", frame->valid ? "VALID" : "INVALID");
+    // ==========================================================================
+    // OUTPUTS
+    // ==========================================================================
+    printf("\nOUTPUTS:\n");
+    printf("--------\n");
 
-    // Timestamp (if present)
-    if (frame->length >= 9) {
-        int minute = frame->data[3];
-        int hour = frame->data[4] & 0x1F;
-        int dst = (frame->data[4] >> 5) & 1;
-        int day = frame->data[5];
-        int month = frame->data[6];
-        int year = 2000 + frame->data[7];
-        printf("  Time:          %04d-%02d-%02d %02d:%02d (DST:%d)\n",
-               year, month, day, hour, minute, dst);
+    for (int i = 0; i < NUM_OUTPUTS; i++) {
+        bool is_on = is_output_on(frame->data, i + 1);
+        printf("  A%-2d %-16s: %s\n", i + 1, output_names[i], is_on ? "EIN" : "AUS");
     }
 
-    printf("========================================\n\n");
+    // ==========================================================================
+    // SPEED LEVELS
+    // ==========================================================================
+    printf("\nSPEED LEVELS:\n");
+    printf("-------------\n");
+
+    // Speed level byte offsets: A1=42, A2=43, A6=44, A7=45
+    static const int speed_offsets[NUM_SPEED_LEVELS] = {
+        FRAME_OFF_SPEED_A1, FRAME_OFF_SPEED_A2, FRAME_OFF_SPEED_A6, FRAME_OFF_SPEED_A7
+    };
+
+    for (int i = 0; i < NUM_SPEED_LEVELS; i++) {
+        bool active;
+        int speed = decode_speed_level(frame->data[speed_offsets[i]], &active);
+        printf("  %-16s: ", speed_level_names[i]);
+        if (active) {
+            printf("%d\n", speed);
+        } else {
+            printf("--- (inactive)\n");
+        }
+    }
+
+    // ==========================================================================
+    // HEAT METERS
+    // ==========================================================================
+    printf("\nHEAT METERS:\n");
+    printf("------------\n");
+
+    uint8_t heat_reg = frame->data[FRAME_OFF_HEAT_REG];
+
+    // Heat meter 1
+    if (heat_reg & 0x01) {
+        float power1 = decode_heat_power(&frame->data[FRAME_OFF_HEAT1]);
+        float energy1 = decode_heat_energy(&frame->data[FRAME_OFF_HEAT1]);
+        printf("  Heat Meter 1:\n");
+        printf("    Power:  %7.2f kW\n", power1);
+        printf("    Energy: %9.1f kWh (%.1f MWh)\n", energy1, energy1 / 1000.0f);
+    } else {
+        printf("  Heat Meter 1: (inactive)\n");
+    }
+
+    // Heat meter 2
+    if (heat_reg & 0x02) {
+        float power2 = decode_heat_power(&frame->data[FRAME_OFF_HEAT2]);
+        float energy2 = decode_heat_energy(&frame->data[FRAME_OFF_HEAT2]);
+        printf("  Heat Meter 2:\n");
+        printf("    Power:  %7.2f kW\n", power2);
+        printf("    Energy: %9.1f kWh (%.1f MWh)\n", energy2, energy2 / 1000.0f);
+    } else {
+        printf("  Heat Meter 2: (inactive)\n");
+    }
+
+    // ==========================================================================
+    // STATISTICS
+    // ==========================================================================
+    printf("\nSTATISTICS:\n");
+    printf("-----------\n");
+    printf("  Good Frames: %lu\n", (unsigned long)stat_frames_valid);
+    printf("  Bad Frames:  %lu\n", (unsigned long)(stat_frames_decoded - stat_frames_valid));
+    if (stat_frames_decoded > 0) {
+        printf("  Error Rate:  %.2f%%\n",
+               100.0f * (stat_frames_decoded - stat_frames_valid) / stat_frames_decoded);
+    }
+
+    printf("============================================================\n\n");
 }
 
 // =============================================================================

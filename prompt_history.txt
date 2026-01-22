@@ -1,0 +1,582 @@
+================================================================================
+UVR2MQTT-D1-RMT Project - Prompt History
+================================================================================
+
+================================================================================
+ITERATION 1 - 2026-01-20
+================================================================================
+
+USER PROMPT:
+------------
+Make my project uvr2mqtt-d1-rmt you can find the details in uvr2mqtt-d1-rmt_fsd.md
+and the needed board and DL-protocoll informations in the /docs folder
+First we want only to focus on decoding the dl-bus - print raw bytes to serial
+and mark syncs
+No need for building I will build it on my on an external laptop with VSC and
+platformio
+Make a summary of what you did after each iteration including the prompt into
+the file prompt_history.txt so that you can remember better what we did.
+
+WHAT WAS DONE:
+--------------
+1. Read and analyzed the functional specification document (uvr2mqtt-d1-rmt_fsd.md)
+2. Read and analyzed the DL-Bus protocol specification (Datenleitung.PDF)
+
+3. Created project structure:
+   - platformio.ini: ESP-IDF framework configuration for D1 Mini ESP32
+   - main/main.c: Main source file with RMT-based DL-Bus decoder
+   - main/CMakeLists.txt: ESP-IDF component configuration
+   - prompt_history.txt: This file for tracking iterations
+
+4. Implemented Phase 1 features in main.c:
+   - RMT peripheral initialization on GPIO26
+   - Raw RMT symbol capture and display
+   - Two decoder approaches:
+     a) Simple decoder: pulse classification and SYNC detection
+     b) Frame decoder: Manchester-like decoding with phase tracking
+   - SYNC detection (looking for 16 high bits = 32 half-bit pulses)
+   - Raw byte printing in hex format with key byte identification
+   - Basic checksum calculation
+   - Statistics tracking (SYNC count, frame count, errors)
+
+KEY PROTOCOL DETAILS EXTRACTED:
+-------------------------------
+- UVR1611 uses 488 Hz display clock
+- Bit duration: 2.048 ms (2048 µs)
+- Half-bit duration: 1.024 ms (1024 µs)
+- Data is XOR'd with clock, then inverted by output transistor
+- SYNC: 16 high bits without start/stop bit
+- Byte format: 1 start bit (0), 8 data bits (LSB first), 1 stop bit (1)
+- Frame: 65 bytes total (SYNC + 64 data bytes including checksum)
+- Device ID: 0x80, inverted: 0x7F
+- Checksum: sum of bytes 1-63 mod 256
+
+FILES CREATED:
+--------------
+- /home/stefan/projects/uvr2mqtt-d1-rmt/platformio.ini
+- /home/stefan/projects/uvr2mqtt-d1-rmt/main/main.c
+- /home/stefan/projects/uvr2mqtt-d1-rmt/main/CMakeLists.txt
+- /home/stefan/projects/uvr2mqtt-d1-rmt/prompt_history.txt
+
+NEXT STEPS (for future iterations):
+------------------------------------
+1. Build and test on actual hardware
+2. Fine-tune timing tolerances based on real signal
+3. Improve SYNC detection algorithm if needed
+4. Implement proper Manchester decoding based on observed signal patterns
+5. Add frame validation (device ID check, checksum verification)
+6. Move to Phase 2: Full frame parsing with sensor data decoding
+
+================================================================================
+ITERATION 1.1 - 2026-01-20 (Bugfix)
+================================================================================
+
+USER FEEDBACK:
+--------------
+Build failed with "Error: Missing the `src` folder with project sources."
+
+FIX APPLIED:
+------------
+- Renamed `main/` folder to `src/` (PlatformIO expects src folder, not main)
+- Removed CMakeLists.txt (PlatformIO handles this automatically)
+- Added `src_dir = src` to platformio.ini
+- Changed build flag from LOG_LOCAL_LEVEL to CONFIG_LOG_DEFAULT_LEVEL
+
+NEW PROJECT STRUCTURE:
+----------------------
+uvr2mqtt-d1-rmt/
+├── platformio.ini
+├── src/
+│   └── main.c
+├── docs/
+├── prompt_history.txt
+└── uvr2mqtt-d1-rmt_fsd.md
+
+================================================================================
+ITERATION 1.2 - 2026-01-20 (Additional fixes)
+================================================================================
+
+ISSUES FIXED:
+-------------
+1. Git repository issues - ESP-IDF CMake requires git metadata
+   - User initialized git repo in project and framework directories
+   - Cleaned .pio folder to clear stale cache
+
+2. Missing partition table file
+   - Removed `board_build.partitions = default.csv` from platformio.ini
+
+3. Compiler errors
+   - Changed `%u` to `%lu` with casts for uint32_t format specifiers
+   - Removed unused `frame_byte_count` and `in_sync` variables
+   - Fixed unsigned comparison issue (accumulated < 0)
+   - Removed CONFIG_LOG_DEFAULT_LEVEL build flag (redefinition)
+
+4. Runtime error: RMT channel state issue
+   - After timeout, rmt_receive() failed with "channel not in enable state"
+   - Fixed by adding rmt_disable/rmt_enable cycle after timeouts
+
+================================================================================
+ITERATION 1.3 - 2026-01-20 (Debug DL-Bus no data)
+================================================================================
+
+USER FEEDBACK:
+--------------
+DL-Bus is connected but no data received (continuous timeouts).
+User confirms: "yes bus is connected board works with an other project please
+add more debuging to find the cause"
+
+DEBUGGING ADDED:
+----------------
+1. GPIO level monitoring functions:
+   - read_gpio_level(): Read raw GPIO state
+   - debug_gpio_activity(): Monitor GPIO for transitions over a time period
+     - Counts samples, transitions, high/low ratio
+     - Warns if no transitions detected (signal issue)
+
+2. init_gpio_debug(): Configure GPIO with internal pull-up before RMT takes over
+
+3. Enhanced startup sequence:
+   - Initialize GPIO for debugging first
+   - Run 500ms GPIO activity monitor before RMT init
+   - Print initial GPIO level
+
+4. Enhanced main loop:
+   - Print GPIO level before each receive attempt
+   - Print GPIO level at timeout
+   - Every 3 timeouts, disable RMT and run GPIO activity check
+   - Track timeout count for diagnostics
+
+5. Added esp_rom_sys.h include for esp_rom_delay_us
+
+DIAGNOSTIC OUTPUT:
+------------------
+The new debugging will show:
+- Whether the GPIO sees any signal activity at all
+- The idle level of the bus (high or low)
+- Transition count to verify data is being transmitted
+- Helps distinguish between:
+  a) No signal on GPIO (wiring/connection issue)
+  b) Signal present but RMT not capturing (config issue)
+
+================================================================================
+ITERATION 1.4 - 2026-01-20 (RMT config fixes, buffer increase)
+================================================================================
+
+USER FEEDBACK:
+--------------
+1. Error: signal_range_max_ns too big (max 65535000 ns)
+   - Fixed: reduced from 100ms to 50ms, then to 5ms
+
+2. GPIO activity confirmed - signal IS present on GPIO26:
+   - 375-410 transitions in 500ms
+   - ~50/50 high/low ratio
+   - Signal activity detected
+
+3. RMT started receiving data after fixing idle threshold
+
+FIXES APPLIED:
+--------------
+1. signal_range_max_ns: 100000000 → 50000000 → 5000000 ns (5ms idle threshold)
+2. signal_range_min_ns: 1000 → 100 ns (more permissive)
+3. RMT buffer: 256 → 512 symbols
+4. rx_symbols array: 256 → 512 elements
+5. Added callback counter for debugging
+6. Improved simple decoder with pulse analysis and bit extraction
+
+RESULTS:
+--------
+- RMT now receiving 448-492 symbols per capture
+- Decoding 52-58 bytes per frame (close to full 64 bytes)
+- SYNC detection working (32-35 half-bits detected)
+- One frame showed correct inverted ID: "Byte 2: 0x7F (OK)"
+
+CURRENT STATE - END OF DAY 1:
+-----------------------------
+RMT capture is working well. Main remaining issue is byte decoding accuracy.
+
+Observations from final log:
+1. Device ID varies: 0x40, 0xBF, 0x5F, 0xEF, 0x7F, 0x17, 0xC5, etc.
+2. Expected: Device ID 0x80, inverted 0x7F
+3. One frame showed 0xEF with 0x7F (OK) - partial success
+4. Repeating patterns visible: AF 50 AF 50... or 51 51 51 51... (likely sensor data)
+5. Signal polarity varies based on capture start point
+
+Key insight: When we got "Byte 2: 0x7F (OK)", byte 1 was 0xEF (not 0x80).
+This means our bit decoding has phase/alignment issues.
+
+ANALYSIS FOR TOMORROW:
+----------------------
+The frame decoder using half-bit counting approach is partially working:
+- SYNC detection: WORKING (32-35 half-bits)
+- Frame capture: WORKING (50+ bytes)
+- Byte decoding: NEEDS FIX (bit alignment/phase issues)
+
+The DL-Bus encoding (XOR with 488 Hz clock + transistor inversion):
+- "1" bit: HIGH (1024µs) then LOW (1024µs)
+- "0" bit: LOW (1024µs) then HIGH (1024µs)
+- SYNC (16 ones): alternating 1024µs pulses
+- After SYNC, start bit (0) causes phase shift (LONG pulse ~2048µs)
+
+Probable issues with current decoder:
+1. Bit sampling point may be off (should sample at bit boundary, not mid-bit)
+2. Phase tracking after SYNC transition not handled correctly
+3. May need to invert decoded bits or handle signal polarity
+
+Raw timing is excellent:
+- Short pulses: 968-1034 µs (target: 1024 µs) ✓
+- Long pulses: 1969-2035 µs (target: 2048 µs) ✓
+
+TODO FOR NEXT SESSION:
+----------------------
+1. Fix bit decoding phase alignment in decode_dlbus_frame()
+2. Handle the SYNC → start bit transition (long pulse marks phase change)
+3. Consider signal polarity (sometimes H>L, sometimes L>H)
+4. Test with proper byte alignment to get 0x80 0x7F as first two bytes
+5. Once decoding works, implement checksum verification
+6. Parse sensor data fields per protocol specification
+
+COMPILER WARNING (expected):
+----------------------------
+decode_dlbus_simple defined but not used - we switched to frame decoder only
+
+================================================================================
+ITERATION 2 - 2026-01-21 (Pipeline Architecture Refactor)
+================================================================================
+
+USER PROMPT:
+------------
+I would like to improve the code in that way: RMT Hardware reads edges -> raw edge
+buffer as a circular buffer big enough to capture at least 1.5 DL_Bus frames ->
+bit extracting as a task -> Manchester decoding as a task -> DL-Bus Frames as a result
+
+WHAT WAS DONE:
+--------------
+Complete architectural refactor from monolithic to pipeline-based design.
+
+NEW ARCHITECTURE:
+-----------------
+1. RMT Hardware -> Edge Circular Buffer (1024 entries, ~1.5 frames)
+2. Bit Extractor Task -> Bit Queue (1024 entries)
+3. Manchester Decoder Task -> Frame Queue (3 frames)
+4. Main Task -> Displays frames and statistics
+
+COMPONENTS CREATED:
+
+1. Edge Circular Buffer (edge_buffer_t):
+   - Stores pulse durations with level (HIGH/LOW)
+   - Size: 1024 entries (~1.5 frames worth)
+   - Lock-free single-producer/single-consumer safe design
+   - Mutex for batch operations from RMT callback
+   - Binary semaphore for data-ready signaling
+
+2. RMT Receive Task (rmt_receive_task):
+   - Priority 10 (highest)
+   - Continuously receives RMT symbols
+   - Copies symbols to edge circular buffer
+   - Signals bit extractor when data available
+
+3. Bit Extractor Task (bit_extractor_task):
+   - Priority 8
+   - Reads edges from circular buffer
+   - Classifies pulses: SHORT (~1024us), LONG (~2048us), INVALID
+   - Counts half-bits and extracts bits at 2-half-bit boundaries
+   - Handles gaps (>5ms) by resetting state
+   - Outputs bit_entry_t to bit_queue
+
+4. Manchester Decoder Task (manchester_decoder_task):
+   - Priority 6
+   - State machine: HUNTING_SYNC -> IN_BYTE
+   - Detects SYNC: 16+ consecutive 1s (or 0s if inverted)
+   - Handles polarity inversion automatically
+   - Assembles bytes: start(0) + 8 data bits (LSB first) + stop(1)
+   - Validates checksum (sum of bytes 0-62 mod 256)
+   - Outputs dlbus_frame_t to frame_queue
+
+5. Main Task (app_main loop):
+   - Receives frames from frame_queue
+   - Prints decoded frames with key fields
+   - Shows timestamp if available
+   - Prints pipeline statistics every 10 seconds
+
+DATA STRUCTURES:
+----------------
+- edge_t: {duration, level}
+- bit_entry_t: {value, is_sync}
+- dlbus_frame_t: {data[64], length, valid, timestamp}
+
+BUFFER SIZING:
+--------------
+- Frame = 64 bytes x 10 bits x ~2 pulses/bit = ~1280 pulses
+- Edge buffer: 1024 entries (safety margin)
+- Bit queue: 1024 entries
+- Frame queue: 3 entries
+
+STATISTICS TRACKED:
+-------------------
+- stat_edges_received
+- stat_bits_extracted
+- stat_syncs_detected
+- stat_frames_decoded
+- stat_frames_valid
+- Buffer fill levels
+
+BENEFITS OF NEW ARCHITECTURE:
+-----------------------------
+1. Separation of concerns - each task has single responsibility
+2. Better buffering - circular buffer prevents data loss
+3. Async processing - tasks run independently
+4. Easier debugging - statistics show pipeline health
+5. More robust - gaps and noise handled gracefully
+6. Extensible - easy to add processing stages
+
+FILES MODIFIED:
+---------------
+- /home/stefan/projects/uvr2mqtt-d1-rmt/src/main.c (complete rewrite)
+- /home/stefan/projects/uvr2mqtt-d1-rmt/prompt_history.txt (this update)
+
+NEXT STEPS:
+-----------
+1. Build and test on hardware
+2. Tune timing tolerances if needed
+3. Fix any bit extraction/decoding issues based on results
+4. Add more detailed frame parsing (sensors, outputs, etc.)
+5. Consider adding debug output for individual stages
+
+================================================================================
+ITERATION 2.1 - 2026-01-21 (RMT Buffer Limitation Discovery & GPIO Solution)
+================================================================================
+
+USER PROMPT:
+------------
+[User provided actual log output showing frames timing out at byte 60]
+"constantly failing at byte30" / "byte0 and byte1 look correct but we still get
+the frame timeout" / "is there no way for continuous rmt receiving?"
+
+PROBLEM DISCOVERED:
+-------------------
+ESP32 RMT peripheral has a fundamental limitation without DMA:
+- Maximum 512 symbols (8 memory blocks × 64 symbols)
+- Full DL-Bus frame needs ~656 symbols (16 SYNC + 64 bytes × 10 bits)
+- Could only capture ~60 bytes (512 symbols) before buffer filled
+- Double-buffering attempted but gaps between captures caused data loss
+- ESP32-WROOM-32 does NOT support DMA for RMT (only ESP32-S2/S3/C3)
+
+SOLUTION IMPLEMENTED:
+---------------------
+Replaced RMT peripheral with GPIO interrupt-based edge capture:
+
+1. GPIO Interrupt Handler (gpio_isr_handler):
+   - Fires on every edge (rising AND falling) using GPIO_INTR_ANYEDGE
+   - Captures timestamp via esp_timer_get_time() (microsecond precision)
+   - Calculates pulse duration since last edge
+   - Stores directly to circular buffer
+   - NO BUFFER SIZE LIMIT - limited only by software buffer (2048 entries)
+   - Fast execution (~1ms pulses = plenty of time for ISR)
+
+2. Removed all RMT code:
+   - No rmt_rx.h include
+   - No RMT channel, callbacks, or tasks
+   - No hardware buffer limitations
+
+3. Pipeline now:
+   GPIO ISR → Edge Buffer → Bit Extractor Task → Manchester Decoder → Frames
+
+RESULTS:
+--------
+- FULL 64-byte frames captured successfully
+- Checksum validation: VALID
+- Device ID: 0x80 (UVR1611) ✓
+- Inverted ID: 0x7F ✓
+- Timestamp decoded correctly
+- Statistics show 665 bits per frame (640 needed + SYNC)
+- No frames dropped, no partial frames
+
+SAMPLE OUTPUT:
+--------------
+========================================
+DL-BUS FRAME (tick=284)
+========================================
+RAW (64 bytes):
+80 7F 0F 1C 11 15 01 1A 04 22 00 21 14 21 FD 20
+F5 72 D5 20 00 22 86 20 F8 AF 00 00 00 00 00 00
+00 00 00 00 00 30 00 00 23 00 9E 9E 9E 80 01 00
+00 00 00 8E 17 0F 00 02 00 02 00 00 3E 0A 3C B9
+
+Key Fields:
+  Device ID:     0x80 (UVR1611)
+  ID Inverted:   0x7F (OK)
+  Checksum:      VALID
+  Time:          2026-01-21 17:28 (DST:0)
+========================================
+
+FILES MODIFIED:
+---------------
+- src/main.c: Replaced RMT with GPIO interrupt capture
+- prompt_history.txt: This update
+
+KEY LEARNINGS:
+--------------
+1. ESP32 RMT without DMA is limited to 512 symbols max
+2. Double-buffering doesn't help when signal is continuous
+3. GPIO interrupts are better for slow protocols (~1ms pulses)
+4. esp_timer_get_time() provides microsecond-precision timestamps
+5. ISR-based capture has no inherent buffer limit
+
+PHASE 1 STATUS: COMPLETE ✓
+--------------------------
+All Phase 1 requirements met:
+- [x] DL-Bus signal capture
+- [x] SYNC detection
+- [x] Full frame reception (64 bytes)
+- [x] Checksum validation
+- [x] Device ID verification
+- [x] Timestamp parsing
+
+NEXT STEPS:
+-----------
+1. Parse sensor values (temperatures, flow rate)
+2. Parse output states (A1-A13)
+3. Parse speed levels and heat meters
+4. Clean up debug output
+5. Consider MQTT integration (Phase 2)
+
+================================================================================
+ITERATION 3 - 2026-01-22 (I/O Configuration & Sensor Parsing)
+================================================================================
+
+USER PROMPT:
+------------
+"looks good now lets add a file with which we can set the configuration of our
+sensor and outputs etc it should have this content the name should be io-config
+and be editable before build by user"
+
+[User provided sensor names S1-S16, output names A1-A13, speed level names,
+and sensor unit strings]
+
+"please make an esp-idf conform config"
+"yes restructure for native esp-idf"
+"I still want to build with platformio"
+"so now map all values to the corresponding sensors, pumps ..."
+
+WHAT WAS DONE:
+--------------
+
+1. Created ESP-IDF Kconfig Configuration:
+   - src/Kconfig.projbuild: Full menuconfig integration with:
+     - Sensor Names menu (S1-S16) with German labels
+     - Output Names menu (A1-A13)
+     - Speed Level Names menu (A1, A2, A6, A7)
+     - Sensor Units menu (by type: unused, digital, temp, flow, radiation, room)
+   - src/io_config.h: Header providing array macros from Kconfig values
+
+2. Project Structure (kept PlatformIO compatible):
+   uvr2mqtt-D1_mini_ESP32/
+   ├── platformio.ini          # PlatformIO config (framework = espidf)
+   ├── src/
+   │   ├── main.c              # Main application
+   │   ├── Kconfig.projbuild   # Menuconfig definitions
+   │   └── io_config.h         # Config arrays from Kconfig
+   └── ...
+
+3. Added Frame Parsing to main.c:
+
+   Frame Byte Offsets (UVR1611 Protocol):
+   - Bytes 0-1: Device ID (0x80) and inverted (0x7F)
+   - Bytes 3-7: Timestamp (minute, hour, day, month, year)
+   - Bytes 8-39: 16 sensors (2 bytes each: low, high)
+   - Bytes 40-41: Output states (A1-A8, A9-A13)
+   - Bytes 42-45: Speed levels (A1, A2, A6, A7)
+   - Byte 46: Heat meter register
+   - Bytes 47-54: Heat meter 1 data
+   - Bytes 55-62: Heat meter 2 data
+   - Byte 63: Checksum
+
+   Parsing Functions Added:
+   - get_sensor_type(): Extract type from high byte bits 4-6
+   - get_sensor_unit(): Get unit string for sensor type
+   - decode_sensor_value(): Decode value based on type (temp, flow, etc.)
+   - is_output_on(): Check output state from bytes 40-41
+   - decode_speed_level(): Parse speed value and active flag
+   - decode_heat_power(): Decode instantaneous power (kW)
+   - decode_heat_energy(): Decode total energy (kWh)
+
+   Updated print_frame():
+   - Shows all 16 sensors with configured names and units
+   - Shows all 13 outputs with ON/OFF (EIN/AUS) state
+   - Shows 4 speed levels with active/inactive status
+   - Shows both heat meters with power and energy
+   - Skips sensors marked as "---" (unused)
+
+4. Fixed Room Sensor Decoding Bug:
+
+   USER FEEDBACK:
+   "S5 Temp.Raum: 76.5 C is showing a wrong value in reality it has 25.3 C"
+
+   ROOT CAUSE:
+   - Room sensors (type 0x70) have different encoding than temperature sensors
+   - Bits 0-3 of high byte contain operating mode, NOT temperature data
+   - Was incorrectly reading 12-bit value (765) instead of 8-bit (253)
+   - Difference: 765 - 253 = 512 = bit 9 (from high byte bit 1)
+
+   FIX APPLIED:
+   - Temperature sensors (0x20): 12-bit value (low byte + bits 0-3 of high byte)
+   - Room sensors (0x70): 8-bit value (low byte only)
+   - After fix: S5 Temp.Raum correctly shows 25.3°C
+
+SAMPLE OUTPUT (after fix):
+--------------------------
+==================== UVR1611 Frame #78 ====================
+Timestamp: 2026-01-22 17:21 (DST: No)
+Device ID: 0x80 (Valid)
+Checksum:  OK
+
+SENSORS:
+--------
+  S1  T.Heizkr.VL     :   59.9 C
+  S2  T.Heizkr.RL     :   25.9 C
+  S5  Temp.Raum       :   25.3 C   <-- Fixed!
+  S7  T.Boiler        :   50.7 C
+  S15 Durchfl.HKR     :      0 l/h
+
+OUTPUTS:
+--------
+  A1  Pump-Hzkr1      : EIN
+  A2  Pumpe-Hzkr2 FB  : EIN
+  A6  Ventil          : EIN
+  ...
+
+SPEED LEVELS:
+-------------
+  Drehz A1        : 30
+  Drehz A2        : 30
+  Drehz A6        : 30
+  Drehz A7        : 0
+
+HEAT METERS:
+------------
+  Heat Meter 1:
+    Power:     0.00 kW
+    Energy:   15640.0 kWh (15.6 MWh)
+============================================================
+
+CONFIGURATION USAGE:
+--------------------
+Run: pio run -t menuconfig
+Navigate to: "UVR1611 I/O Configuration"
+Edit sensor/output names as needed, then build.
+
+FILES CREATED/MODIFIED:
+-----------------------
+- src/Kconfig.projbuild (new): Menuconfig definitions
+- src/io_config.h (new): Config array macros
+- src/main.c (modified): Added parsing functions and updated print_frame()
+- prompt_history.txt (modified): This update
+
+NEXT STEPS:
+-----------
+1. Add MQTT publishing (Phase 2)
+2. Add WiFi configuration
+3. Home Assistant auto-discovery
+4. OTA updates (Phase 3)
+
+================================================================================

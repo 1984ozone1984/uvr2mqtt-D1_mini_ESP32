@@ -1,0 +1,257 @@
+menu "UVR1611 I/O Configuration"
+
+    menu "Sensor Names (S1-S16)"
+        config SENSOR_S1_NAME
+            string "S1 Sensor Name"
+            default "T.Heizkr.VL"
+            help
+                Heizkreis Vorlauf Temperatur
+
+        config SENSOR_S2_NAME
+            string "S2 Sensor Name"
+            default "T.Heizkr.RL"
+            help
+                Heizkreis Ruecklauf Temperatur
+
+        config SENSOR_S3_NAME
+            string "S3 Sensor Name"
+            default "T.Heizkr.VL1"
+            help
+                Radiatoren Vorlauf Temperatur
+
+        config SENSOR_S4_NAME
+            string "S4 Sensor Name"
+            default "T.Heizkr.VL2 FB"
+            help
+                Fussbodenheizung Vorlauf Temperatur
+
+        config SENSOR_S5_NAME
+            string "S5 Sensor Name"
+            default "Temp.Raum"
+            help
+                Raumtemperatur
+
+        config SENSOR_S6_NAME
+            string "S6 Sensor Name"
+            default "Temp.Raum1"
+            help
+                Raumtemperatur 1
+
+        config SENSOR_S7_NAME
+            string "S7 Sensor Name"
+            default "T.Boiler"
+            help
+                Boiler Temperatur
+
+        config SENSOR_S8_NAME
+            string "S8 Sensor Name"
+            default "T.Boiler.u"
+            help
+                Boiler unten Temperatur
+
+        config SENSOR_S9_NAME
+            string "S9 Sensor Name"
+            default "T.Kollektor"
+            help
+                Solar Kollektor Temperatur
+
+        config SENSOR_S10_NAME
+            string "S10 Sensor Name"
+            default "---"
+            help
+                Unused
+
+        config SENSOR_S11_NAME
+            string "S11 Sensor Name"
+            default "---"
+            help
+                Unused
+
+        config SENSOR_S12_NAME
+            string "S12 Sensor Name"
+            default "---"
+            help
+                Unused
+
+        config SENSOR_S13_NAME
+            string "S13 Sensor Name"
+            default "---"
+            help
+                Unused
+
+        config SENSOR_S14_NAME
+            string "S14 Sensor Name"
+            default "---"
+            help
+                Unused
+
+        config SENSOR_S15_NAME
+            string "S15 Sensor Name"
+            default "Durchfl.HKR"
+            help
+                Durchfluss Heizkreis (l/h)
+
+        config SENSOR_S16_NAME
+            string "S16 Sensor Name"
+            default "---"
+            help
+                Unused
+    endmenu
+
+    menu "Output Names (A1-A13)"
+        config OUTPUT_A1_NAME
+            string "A1 Output Name"
+            default "Pump-Hzkr1"
+            help
+                Pumpe Heizkreis 1 Radiatoren
+
+        config OUTPUT_A2_NAME
+            string "A2 Output Name"
+            default "Pumpe-Hzkr2 FB"
+            help
+                Pumpe Fussbodenheizung
+
+        config OUTPUT_A3_NAME
+            string "A3 Output Name"
+            default "Misch Hzkr1"
+            help
+                Mischer Heizkreis 1 Radiatoren
+
+        config OUTPUT_A4_NAME
+            string "A4 Output Name"
+            default "Misch Zu"
+            help
+                Mischer Zu
+
+        config OUTPUT_A5_NAME
+            string "A5 Output Name"
+            default "A5"
+            help
+                Not labeled
+
+        config OUTPUT_A6_NAME
+            string "A6 Output Name"
+            default "Ventil"
+            help
+                Ventil
+
+        config OUTPUT_A7_NAME
+            string "A7 Output Name"
+            default "Pumpe-Solar"
+            help
+                Pumpe Solar
+
+        config OUTPUT_A8_NAME
+            string "A8 Output Name"
+            default "Misch Hzkr2 Auf"
+            help
+                Mischer FB Auf
+
+        config OUTPUT_A9_NAME
+            string "A9 Output Name"
+            default "Misch FB Zu"
+            help
+                Mischer FB Zu
+
+        config OUTPUT_A10_NAME
+            string "A10 Output Name"
+            default "LadePWW"
+            help
+                Warmwasser Ladung
+
+        config OUTPUT_A11_NAME
+            string "A11 Output Name"
+            default "A11"
+            help
+                Not labeled
+
+        config OUTPUT_A12_NAME
+            string "A12 Output Name"
+            default "A12"
+            help
+                Not labeled
+
+        config OUTPUT_A13_NAME
+            string "A13 Output Name"
+            default "A13"
+            help
+                Not labeled
+    endmenu
+
+    menu "Speed Level Names"
+        config SPEED_A1_NAME
+            string "Speed Level A1 Name"
+            default "Drehz A1"
+            help
+                Speed level name for output A1
+
+        config SPEED_A2_NAME
+            string "Speed Level A2 Name"
+            default "Drehz A2"
+            help
+                Speed level name for output A2
+
+        config SPEED_A6_NAME
+            string "Speed Level A6 Name"
+            default "Drehz A6"
+            help
+                Speed level name for output A6
+
+        config SPEED_A7_NAME
+            string "Speed Level A7 Name"
+            default "Drehz A7"
+            help
+                Speed level name for output A7
+    endmenu
+
+    menu "Sensor Units"
+        config UNIT_UNUSED
+            string "Unit for Unused (0x00)"
+            default ""
+            help
+                Unit string for unused sensor type
+
+        config UNIT_DIGITAL
+            string "Unit for Digital (0x10)"
+            default ""
+            help
+                Unit string for digital sensor type
+
+        config UNIT_TEMPERATURE
+            string "Unit for Temperature (0x20)"
+            default " C"
+            help
+                Unit string for temperature sensor type
+
+        config UNIT_FLOW_RATE
+            string "Unit for Flow Rate (0x30)"
+            default " l/h"
+            help
+                Unit string for flow rate sensor type
+
+        config UNIT_RESERVED_40
+            string "Unit for Reserved (0x40)"
+            default ""
+            help
+                Unit string for reserved sensor type 0x40
+
+        config UNIT_RESERVED_50
+            string "Unit for Reserved (0x50)"
+            default ""
+            help
+                Unit string for reserved sensor type 0x50
+
+        config UNIT_RADIATION
+            string "Unit for Radiation (0x60)"
+            default " W/m2"
+            help
+                Unit string for radiation sensor type
+
+        config UNIT_ROOM_SENSOR
+            string "Unit for Room Sensor (0x70)"
+            default " C"
+            help
+                Unit string for room sensor type
+    endmenu
+
+endmenu
