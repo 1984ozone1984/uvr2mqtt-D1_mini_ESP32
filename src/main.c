@@ -31,6 +31,7 @@
 #include "esp_timer.h"
 #include "esp_rom_sys.h"
 #include "io_config.h"
+#include "mqtt_ha.h"
 
 static const char *TAG = "DL-BUS";
 
@@ -882,6 +883,85 @@ static void print_frame(const dlbus_frame_t *frame)
 }
 
 // =============================================================================
+// MQTT Frame Processing
+// =============================================================================
+
+/**
+ * Process frame data for MQTT publishing
+ * Extracts all values and sends to MQTT subsystem
+ */
+static void process_frame_for_mqtt(const dlbus_frame_t *frame)
+{
+    // Only process valid frames
+    if (!frame->valid) {
+        return;
+    }
+
+    // ==========================================================================
+    // Process Sensor Values (add samples for median calculation)
+    // ==========================================================================
+    for (int i = 0; i < NUM_SENSORS; i++) {
+        // Skip unused sensors
+        if (strcmp(sensor_names[i], "---") == 0) {
+            continue;
+        }
+
+        int byte_offset = FRAME_OFF_SENSORS + (i * 2);
+        uint8_t low_byte = frame->data[byte_offset];
+        uint8_t high_byte = frame->data[byte_offset + 1];
+
+        bool valid;
+        float value = decode_sensor_value(low_byte, high_byte, &valid);
+
+        if (valid) {
+            mqtt_ha_add_sensor_sample(i, value);
+        }
+    }
+
+    // ==========================================================================
+    // Process Output States (publish immediately on change)
+    // ==========================================================================
+    for (int i = 0; i < NUM_OUTPUTS; i++) {
+        bool is_on = is_output_on(frame->data, i + 1);
+        mqtt_ha_update_output(i, is_on);
+    }
+
+    // ==========================================================================
+    // Process Speed Levels (publish immediately on change)
+    // ==========================================================================
+    static const int speed_offsets[NUM_SPEED_LEVELS] = {
+        FRAME_OFF_SPEED_A1, FRAME_OFF_SPEED_A2, FRAME_OFF_SPEED_A6, FRAME_OFF_SPEED_A7
+    };
+
+    for (int i = 0; i < NUM_SPEED_LEVELS; i++) {
+        bool active;
+        int speed = decode_speed_level(frame->data[speed_offsets[i]], &active);
+        mqtt_ha_update_speed(i, speed, active);
+    }
+
+    // ==========================================================================
+    // Process Heat Meters
+    // ==========================================================================
+    uint8_t heat_reg = frame->data[FRAME_OFF_HEAT_REG];
+
+    // Heat meter 1
+    bool heat1_active = (heat_reg & 0x01) != 0;
+    if (heat1_active) {
+        float power1 = decode_heat_power(&frame->data[FRAME_OFF_HEAT1]);
+        float energy1 = decode_heat_energy(&frame->data[FRAME_OFF_HEAT1]);
+        mqtt_ha_publish_heat_meter(0, power1, energy1, true);
+    }
+
+    // Heat meter 2
+    bool heat2_active = (heat_reg & 0x02) != 0;
+    if (heat2_active) {
+        float power2 = decode_heat_power(&frame->data[FRAME_OFF_HEAT2]);
+        float energy2 = decode_heat_energy(&frame->data[FRAME_OFF_HEAT2]);
+        mqtt_ha_publish_heat_meter(1, power2, energy2, true);
+    }
+}
+
+// =============================================================================
 // GPIO Debug Functions
 // =============================================================================
 
@@ -959,12 +1039,29 @@ void app_main(void)
 {
     printf("\n\n");
     printf("================================================\n");
-    printf("  UVR1611 DL-Bus Reader - GPIO Interrupt Capture\n");
+    printf("  UVR1611 DL-Bus Reader - MQTT Gateway\n");
     printf("================================================\n");
     printf("GPIO:         %d\n", DL_BUS_GPIO);
     printf("Bit duration: %d us (488 Hz clock)\n", BIT_DURATION_US);
     printf("Frame size:   %d bytes\n", FRAME_BYTES);
     printf("================================================\n\n");
+
+    // ==========================================================================
+    // Initialize MQTT and WiFi
+    // ==========================================================================
+    ESP_LOGI(TAG, "Initializing MQTT...");
+    if (mqtt_ha_init() != ESP_OK) {
+        ESP_LOGE(TAG, "MQTT initialization failed!");
+        // Continue without MQTT - DL-Bus reading will still work
+    } else {
+        ESP_LOGI(TAG, "Starting WiFi and MQTT...");
+        if (mqtt_ha_start() != ESP_OK) {
+            ESP_LOGW(TAG, "MQTT start failed - continuing without MQTT");
+        } else {
+            const system_info_t *sys_info = mqtt_ha_get_system_info();
+            ESP_LOGI(TAG, "WiFi connected: IP=%s, MAC=%s", sys_info->ip_address, sys_info->mac_address);
+        }
+    }
 
     // Check signal activity before setting up interrupts
     init_gpio_for_debug();
@@ -1005,15 +1102,22 @@ void app_main(void)
     ESP_LOGI(TAG, "Pipeline started with GPIO interrupt capture!");
     printf("\n--- Waiting for frames ---\n\n");
 
-    // Main loop - process decoded frames and print statistics
+    // Main loop - process decoded frames, MQTT, and print statistics
     dlbus_frame_t frame;
     TickType_t last_stats_time = xTaskGetTickCount();
 
     while (1) {
         // Check for decoded frames
-        if (xQueueReceive(frame_queue, &frame, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        if (xQueueReceive(frame_queue, &frame, pdMS_TO_TICKS(100)) == pdTRUE) {
+            // Print frame to serial
             print_frame(&frame);
+
+            // Process frame for MQTT publishing
+            process_frame_for_mqtt(&frame);
         }
+
+        // Run MQTT loop (handles publish intervals)
+        mqtt_ha_loop();
 
         // Print statistics every 10 seconds
         TickType_t now = xTaskGetTickCount();
@@ -1031,6 +1135,7 @@ void app_main(void)
             printf("  Frames valid:    %lu\n", (unsigned long)stat_frames_valid);
             printf("  Edge buffer:     %lu/%d\n", (unsigned long)edge_buffer_count(&edge_buffer), EDGE_BUFFER_SIZE);
             printf("  Bit queue:       %lu/%d\n", (unsigned long)uxQueueMessagesWaiting(bit_queue), BIT_QUEUE_SIZE);
+            printf("  MQTT connected:  %s\n", mqtt_ha_is_connected() ? "Yes" : "No");
             printf("--------------------------------------------\n\n");
             last_stats_time = now;
         }

@@ -3,8 +3,9 @@
 .pioenvs/
 .piolibdeps/
 
-# Secrets (credentials)
+# Secrets (credentials) - NEVER commit these files!
 include/secrets.h
+src/wifi_config.h
 
 
 # IDE
@@ -31,4 +32,7 @@ include/secrets.h
 
 # Logs
 *.log
-*.txt
+
+# Keep prompt_history.txt but ignore other txt files in root
+# (commented out to allow tracking prompt_history.txt)
+# *.txt

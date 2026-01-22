@@ -1,0 +1,79 @@
+/**
+ * UVR1611 DL-Bus Reader - WiFi & MQTT Configuration
+ *
+ * IMPORTANT: Copy this file to wifi_config.h and edit your settings.
+ *            wifi_config.h is excluded from git to protect your credentials.
+ *
+ * Usage:
+ *   cp src/wifi_config.h.example src/wifi_config.h
+ *   # Edit wifi_config.h with your actual settings
+ */
+
+#ifndef WIFI_CONFIG_H
+#define WIFI_CONFIG_H
+
+// =============================================================================
+// WiFi Configuration
+// =============================================================================
+#define WIFI_SSID               "your_wifi_ssid"
+#define WIFI_PASSWORD           "your_wifi_password"
+
+// Hostname for mDNS (device will be accessible as hostname.local)
+#define DEVICE_HOSTNAME         "uvr1611-gateway"
+
+// WiFi connection timeout in seconds
+#define WIFI_CONNECT_TIMEOUT_S  30
+
+// =============================================================================
+// MQTT Configuration
+// =============================================================================
+#define MQTT_BROKER_URI         "mqtt://192.168.1.100:1883"
+// For TLS: "mqtts://192.168.1.100:8883"
+
+// MQTT Authentication (leave empty strings if not required)
+#define MQTT_USERNAME           ""
+#define MQTT_PASSWORD           ""
+
+// MQTT Client ID (should be unique per device)
+#define MQTT_CLIENT_ID          "uvr1611_gateway"
+
+// =============================================================================
+// MQTT Topics Configuration
+// =============================================================================
+// Base topic for all UVR1611 data
+#define MQTT_BASE_TOPIC         "uvr1611"
+
+// Home Assistant discovery prefix (default: homeassistant)
+#define HA_DISCOVERY_PREFIX     "homeassistant"
+
+// =============================================================================
+// Publish Intervals (in seconds)
+// =============================================================================
+// Sensor values publish interval (publishes median of values)
+#define PUBLISH_INTERVAL_SENSORS_S      30
+
+// System info publish interval (MAC, IP, uptime, etc.)
+#define PUBLISH_INTERVAL_SYSTEM_S       60
+
+// Output states are published immediately on change, but also periodically
+#define PUBLISH_INTERVAL_OUTPUTS_S      30
+
+// Home Assistant discovery republish interval (0 = only on startup)
+#define HA_DISCOVERY_INTERVAL_S         300
+
+// =============================================================================
+// Advanced MQTT Settings
+// =============================================================================
+// MQTT keepalive interval in seconds
+#define MQTT_KEEPALIVE_S        60
+
+// MQTT QoS level (0, 1, or 2)
+#define MQTT_QOS                1
+
+// Retain flag for sensor values
+#define MQTT_RETAIN_SENSORS     false
+
+// Retain flag for device status (should be true for LWT)
+#define MQTT_RETAIN_STATUS      true
+
+#endif /* WIFI_CONFIG_H */

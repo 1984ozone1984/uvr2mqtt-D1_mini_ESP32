@@ -580,3 +580,131 @@ NEXT STEPS:
 4. OTA updates (Phase 3)
 
 ================================================================================
+ITERATION 4 - 2026-01-22 (MQTT & Home Assistant Integration)
+================================================================================
+
+USER PROMPT:
+------------
+"Let's proceed with MQTT. Therefore make a new Github branch. I want to have my
+wifi settings, hostname and mqtt settings in a config file which is not uploaded
+to github - please add an example file instead all with esp-idf best known method.
+Also add Homeassistant autodiscovery. I want to publish the Sensor values every
+30 seconds (publish intervals should be set in config file) The value to be
+published should be the median of the values received until last publish.
+For the pump readings publish immediately when the value changes or on publish
+interval. Also publish Mac and IP address via MQTT. And add Mqtt Status so that
+homeassistant knows the on/offline status"
+
+WHAT WAS DONE:
+--------------
+
+1. Created new Git branch: feature/mqtt-homeassistant
+
+2. Created WiFi/MQTT Configuration System:
+   - src/wifi_config.h.example: Template with all settings (excluded from git)
+   - Added src/wifi_config.h to .gitignore to protect credentials
+
+   Configuration options in wifi_config.h:
+   - WIFI_SSID, WIFI_PASSWORD
+   - DEVICE_HOSTNAME
+   - MQTT_BROKER_URI, MQTT_USERNAME, MQTT_PASSWORD
+   - MQTT_BASE_TOPIC, HA_DISCOVERY_PREFIX
+   - PUBLISH_INTERVAL_SENSORS_S (default: 30s)
+   - PUBLISH_INTERVAL_OUTPUTS_S (default: 30s)
+   - PUBLISH_INTERVAL_SYSTEM_S (default: 60s)
+   - HA_DISCOVERY_INTERVAL_S (default: 300s)
+   - MQTT_QOS, MQTT_RETAIN settings
+
+3. Created MQTT & Home Assistant Module:
+
+   src/mqtt_ha.h - Header with:
+   - Sensor buffer structure for median calculation
+   - Output/speed state tracking structures
+   - System info structure (MAC, IP, uptime)
+   - Function declarations for all MQTT operations
+
+   src/mqtt_ha.c - Implementation with:
+   - WiFi connection with retry logic
+   - MQTT client with Last Will and Testament (LWT) for online/offline status
+   - Median calculation using qsort for sensor values
+   - Change detection for outputs (publish immediately on change)
+   - Change detection for speed levels (publish immediately on change)
+   - Home Assistant auto-discovery for all entities:
+     * Temperature sensors with device_class
+     * Flow sensors
+     * Binary sensors for outputs (pumps, valves, mixers)
+     * Speed level sensors
+     * Heat meter power and energy sensors
+     * System uptime sensor
+   - System info publishing (MAC, IP, uptime)
+   - Configurable publish intervals
+
+4. Updated main.c:
+   - Added mqtt_ha.h include
+   - Added process_frame_for_mqtt() function that:
+     * Extracts sensor values and adds to median buffer
+     * Updates output states (triggers immediate publish on change)
+     * Updates speed levels (triggers immediate publish on change)
+     * Publishes heat meter data
+   - Modified app_main() to initialize MQTT/WiFi on startup
+   - Modified main loop to:
+     * Process frames for MQTT
+     * Call mqtt_ha_loop() for interval-based publishing
+     * Show MQTT connection status in statistics
+
+MQTT TOPIC STRUCTURE:
+---------------------
+uvr1611/status                      -> "online" / "offline" (LWT)
+uvr1611/sensor/{name}/state         -> Sensor value (median)
+uvr1611/switch/{name}/state         -> "ON" / "OFF"
+uvr1611/sensor/heat_meter_1_power/state -> Power in kW
+uvr1611/sensor/heat_meter_1_energy/state -> Energy in kWh
+uvr1611/system/mac                  -> MAC address
+uvr1611/system/ip                   -> IP address
+uvr1611/system/uptime               -> Uptime in seconds
+
+HOME ASSISTANT DISCOVERY:
+-------------------------
+Auto-discovery messages published to:
+homeassistant/sensor/{device_id}/{sensor_id}/config
+homeassistant/binary_sensor/{device_id}/{output_id}/config
+
+Features:
+- Device grouping (all entities under "UVR1611 Gateway")
+- Proper device_class for temperature, power, energy
+- Availability based on uvr1611/status topic
+- Unique IDs for each entity
+
+PUBLISH BEHAVIOR:
+-----------------
+- Sensors: Median of all samples since last publish, every 30s (configurable)
+- Outputs: Immediately on state change, also every 30s
+- Speed levels: Immediately on change, also every 30s
+- Heat meters: Every frame (if active)
+- System info: Every 60s (configurable)
+- HA discovery: On connect, then every 300s (configurable)
+
+FILES CREATED/MODIFIED:
+-----------------------
+- src/wifi_config.h.example (new): Configuration template
+- src/mqtt_ha.h (new): MQTT module header
+- src/mqtt_ha.c (new): MQTT module implementation (~650 lines)
+- src/main.c (modified): MQTT integration
+- .gitignore (modified): Added src/wifi_config.h
+
+USAGE:
+------
+1. Copy wifi_config.h.example to wifi_config.h
+2. Edit wifi_config.h with your WiFi and MQTT credentials
+3. Build and flash
+4. Device will connect to WiFi, then MQTT
+5. Home Assistant will auto-discover all entities
+
+NEXT STEPS:
+-----------
+1. Test on hardware with actual MQTT broker
+2. Fine-tune publish intervals if needed
+3. Add OTA updates (Phase 3)
+4. Consider adding web configuration interface
+
+================================================================================
