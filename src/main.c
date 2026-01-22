@@ -302,10 +302,11 @@ static void IRAM_ATTR gpio_isr_handler(void *arg)
 
 /**
  * Initialize GPIO interrupt for DL-Bus capture
+ * ISR is pinned to Core 1 to avoid WiFi interference (WiFi runs on Core 0)
  */
 static esp_err_t init_gpio_capture(void)
 {
-    ESP_LOGI(TAG, "Initializing GPIO interrupt capture on GPIO%d", DL_BUS_GPIO);
+    ESP_LOGI(TAG, "Initializing GPIO interrupt capture on GPIO%d (Core 1)", DL_BUS_GPIO);
 
     // Configure GPIO
     gpio_config_t io_conf = {
@@ -317,8 +318,11 @@ static esp_err_t init_gpio_capture(void)
     };
     ESP_ERROR_CHECK(gpio_config(&io_conf));
 
-    // Install GPIO ISR service with high priority
-    ESP_ERROR_CHECK(gpio_install_isr_service(ESP_INTR_FLAG_IRAM | ESP_INTR_FLAG_LEVEL3));
+    // Install GPIO ISR service with high priority, pinned to Core 1
+    // ESP_INTR_FLAG_IRAM: ISR in IRAM for fast execution
+    // ESP_INTR_FLAG_LEVEL3: High priority interrupt
+    int intr_flags = ESP_INTR_FLAG_IRAM | ESP_INTR_FLAG_LEVEL3;
+    ESP_ERROR_CHECK(gpio_install_isr_service(intr_flags));
 
     // Add handler for our GPIO
     ESP_ERROR_CHECK(gpio_isr_handler_add(DL_BUS_GPIO, gpio_isr_handler, NULL));
@@ -1047,21 +1051,8 @@ void app_main(void)
     printf("================================================\n\n");
 
     // ==========================================================================
-    // Initialize MQTT and WiFi
+    // Initialize DL-Bus Capture FIRST (before WiFi to avoid timing interference)
     // ==========================================================================
-    ESP_LOGI(TAG, "Initializing MQTT...");
-    if (mqtt_ha_init() != ESP_OK) {
-        ESP_LOGE(TAG, "MQTT initialization failed!");
-        // Continue without MQTT - DL-Bus reading will still work
-    } else {
-        ESP_LOGI(TAG, "Starting WiFi and MQTT...");
-        if (mqtt_ha_start() != ESP_OK) {
-            ESP_LOGW(TAG, "MQTT start failed - continuing without MQTT");
-        } else {
-            const system_info_t *sys_info = mqtt_ha_get_system_info();
-            ESP_LOGI(TAG, "WiFi connected: IP=%s, MAC=%s", sys_info->ip_address, sys_info->mac_address);
-        }
-    }
 
     // Check signal activity before setting up interrupts
     init_gpio_for_debug();
@@ -1087,19 +1078,45 @@ void app_main(void)
         return;
     }
 
-    // Initialize GPIO interrupt capture (replaces RMT)
+    // Initialize GPIO interrupt capture
     ESP_ERROR_CHECK(init_gpio_capture());
 
-    // Create tasks
-    ESP_LOGI(TAG, "Starting pipeline tasks...");
+    // Create DL-Bus tasks PINNED TO CORE 1 (WiFi runs on Core 0)
+    // This prevents WiFi interrupts from interfering with timing-critical DL-Bus decoding
+    ESP_LOGI(TAG, "Starting pipeline tasks on Core 1...");
 
-    // Bit extractor task
-    xTaskCreate(bit_extractor_task, "bit_extract", 4096, NULL, 8, &bit_extractor_task_handle);
+    // Bit extractor task - high priority, pinned to Core 1
+    xTaskCreatePinnedToCore(bit_extractor_task, "bit_extract", 4096, NULL,
+                            configMAX_PRIORITIES - 2, &bit_extractor_task_handle, 1);
 
-    // Manchester decoder task
-    xTaskCreate(manchester_decoder_task, "manchester", 4096, NULL, 6, &manchester_decoder_task_handle);
+    // Manchester decoder task - medium-high priority, pinned to Core 1
+    xTaskCreatePinnedToCore(manchester_decoder_task, "manchester", 4096, NULL,
+                            configMAX_PRIORITIES - 3, &manchester_decoder_task_handle, 1);
 
-    ESP_LOGI(TAG, "Pipeline started with GPIO interrupt capture!");
+    ESP_LOGI(TAG, "DL-Bus pipeline started on Core 1!");
+
+    // Wait for DL-Bus pipeline to stabilize before starting WiFi
+    // WiFi initialization causes significant interrupt activity
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    ESP_LOGI(TAG, "DL-Bus pipeline stabilized");
+
+    // ==========================================================================
+    // Initialize MQTT and WiFi (runs on Core 0)
+    // ==========================================================================
+    ESP_LOGI(TAG, "Initializing MQTT...");
+    if (mqtt_ha_init() != ESP_OK) {
+        ESP_LOGE(TAG, "MQTT initialization failed!");
+        // Continue without MQTT - DL-Bus reading will still work
+    } else {
+        ESP_LOGI(TAG, "Starting WiFi and MQTT...");
+        if (mqtt_ha_start() != ESP_OK) {
+            ESP_LOGW(TAG, "MQTT start failed - continuing without MQTT");
+        } else {
+            const system_info_t *sys_info = mqtt_ha_get_system_info();
+            ESP_LOGI(TAG, "WiFi connected: IP=%s, MAC=%s", sys_info->ip_address, sys_info->mac_address);
+        }
+    }
+
     printf("\n--- Waiting for frames ---\n\n");
 
     // Main loop - process decoded frames, MQTT, and print statistics
