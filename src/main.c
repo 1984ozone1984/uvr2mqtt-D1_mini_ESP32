@@ -33,6 +33,7 @@
 #include "esp_rom_sys.h"
 #include "soc/gpio_struct.h"
 #include "io_config.h"
+#include "config_store.h"
 #include "mqtt_ha.h"
 
 static const char *TAG = "DL-BUS";
@@ -1191,6 +1192,15 @@ void app_main(void)
     // WiFi initialization causes significant interrupt activity
     vTaskDelay(pdMS_TO_TICKS(2000));
     ESP_LOGI(TAG, "DL-Bus pipeline stabilized");
+
+    // ==========================================================================
+    // Initialize Configuration Store (NVS)
+    // ==========================================================================
+    ESP_LOGI(TAG, "Initializing configuration store...");
+    if (config_store_init() != ESP_OK) {
+        ESP_LOGE(TAG, "Config store initialization failed!");
+        // Continue - DL-Bus reading will still work but no MQTT
+    }
 
     // ==========================================================================
     // Initialize MQTT and WiFi (runs on Core 0)

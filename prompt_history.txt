@@ -1085,3 +1085,151 @@ src/
 5. No captive portal: Can't configure WiFi without existing connection
 
 ================================================================================
+ITERATION 7 - 2026-01-23 (Configuration Storage Abstraction)
+================================================================================
+
+USER PROMPT:
+------------
+Implement Task 1: Configuration Storage Abstraction
+- Create central, secure configuration storage layer backed by NVS
+- Separate non-secret config (safe to commit) from secret config (NVS only)
+- WiFi and MQTT credentials must NEVER appear in source code, headers, Kconfig,
+  sdkconfig, logs, or any committed files
+- All application code must read configuration through this layer
+
+WHAT WAS DONE:
+--------------
+
+1. Created config_store module:
+   - src/config_store.h: Public API with security guarantees
+   - src/config_store.c: NVS-backed implementation (~700 lines)
+
+2. Security implementation:
+   - Two NVS namespaces: "uvr_config" (settings) and "uvr_secret" (credentials)
+   - Secret getters copy to caller-provided buffers (never return internal pointers)
+   - Secrets cleared from memory after use (memset to 0)
+   - Logging never reveals credential values ("WiFi credentials stored" not the actual SSID)
+
+3. Configuration precedence:
+   - Non-secrets: Load Kconfig default, then apply NVS override if present
+   - Secrets: NVS only, NO Kconfig defaults (must be provisioned at runtime)
+
+4. Updated Kconfig.projbuild:
+   - Added Device Settings menu: hostname, GPIO, WiFi timeout
+   - Added MQTT Settings menu: broker URI, client ID, topics, QoS, retain
+   - Added Publish Intervals menu: sensors, outputs, system, discovery
+   - Comment clearly states credentials are NOT here
+
+5. Updated mqtt_ha.c:
+   - Removed #include "wifi_config.h"
+   - Added #include "config_store.h"
+   - wifi_init(): Gets credentials from config_store (copy to local buffer, then clear)
+   - mqtt_init(): Gets settings from config_store
+   - All MQTT_* macros replaced with config_get_*() function calls
+   - Credentials cleared from stack after passing to ESP-IDF APIs
+
+6. Updated main.c:
+   - Added config_store_init() call before mqtt_ha_init()
+   - Added #include "config_store.h"
+
+7. Removed obsolete files:
+   - Deleted src/wifi_config.h (contained hardcoded credentials)
+   - Deleted src/wifi_config.h.example (no longer needed)
+
+8. Updated CLAUDE.md with new architecture and security model
+
+FILES CREATED:
+--------------
+- src/config_store.h (300 lines): Configuration API
+- src/config_store.c (700 lines): NVS implementation
+
+FILES MODIFIED:
+---------------
+- src/mqtt_ha.c: Use config_store instead of wifi_config.h
+- src/main.c: Initialize config_store at startup
+- src/Kconfig.projbuild: Added non-secret configuration menus
+- CLAUDE.md: Updated architecture documentation
+
+FILES DELETED:
+--------------
+- src/wifi_config.h: Contained hardcoded credentials (security risk)
+- src/wifi_config.h.example: No longer needed
+
+=== CONFIGURATION STORAGE ARCHITECTURE ===
+
+NVS Namespace: "uvr_config" (Non-Secrets)
+-----------------------------------------
+Key              | Type   | Kconfig Default
+-----------------|--------|------------------
+version          | u8     | CONFIG_VERSION (1)
+hostname         | str    | CONFIG_UVR_HOSTNAME
+mqtt_uri         | str    | CONFIG_UVR_MQTT_BROKER_URI
+mqtt_client      | str    | CONFIG_UVR_MQTT_CLIENT_ID
+mqtt_topic       | str    | CONFIG_UVR_MQTT_BASE_TOPIC
+ha_prefix        | str    | CONFIG_UVR_HA_DISCOVERY_PREFIX
+int_sensors      | u16    | CONFIG_UVR_PUBLISH_INTERVAL_SENSORS
+int_outputs      | u16    | CONFIG_UVR_PUBLISH_INTERVAL_OUTPUTS
+int_system       | u16    | CONFIG_UVR_PUBLISH_INTERVAL_SYSTEM
+int_disc         | u16    | CONFIG_UVR_HA_DISCOVERY_INTERVAL
+wifi_timeout     | u16    | CONFIG_UVR_WIFI_TIMEOUT
+dlbus_gpio       | u8     | CONFIG_UVR_DLBUS_GPIO
+mqtt_keep        | u16    | CONFIG_UVR_MQTT_KEEPALIVE
+mqtt_qos         | u8     | CONFIG_UVR_MQTT_QOS
+mqtt_ret_s       | u8     | CONFIG_UVR_MQTT_RETAIN_SENSORS
+mqtt_ret_st      | u8     | CONFIG_UVR_MQTT_RETAIN_STATUS
+
+NVS Namespace: "uvr_secret" (Credentials - NO Kconfig defaults!)
+----------------------------------------------------------------
+Key              | Type   | Notes
+-----------------|--------|------------------
+wifi_ssid        | str    | WiFi network name
+wifi_pass        | str    | WiFi password
+mqtt_user        | str    | MQTT username
+mqtt_pass        | str    | MQTT password
+
+=== HOW SECRETS ARE PROTECTED ===
+
+1. No compile-time storage:
+   - No #define for SSID/password anywhere
+   - No Kconfig defaults for credentials
+   - Not in sdkconfig or any generated files
+
+2. Secure API design:
+   - config_get_wifi_ssid(buffer, len) copies to caller buffer
+   - Never returns const char* to internal storage
+   - Buffer size checked, null-terminated
+
+3. Memory hygiene:
+   - After copying to ESP-IDF wifi_config_t, clear stack buffers
+   - memset(pass_buf, 0, sizeof(pass_buf)) immediately after use
+
+4. Logging safety:
+   - Only log "WiFi credentials stored" not the actual values
+   - Log broker URI (non-secret) but not username/password
+
+5. Version migration:
+   - Config version stored in NVS
+   - On version mismatch: reset non-secrets, keep secrets
+
+=== FIRST BOOT EXPERIENCE ===
+
+Since credentials are no longer in source code:
+
+1. Flash firmware
+2. Device boots, config_store_init() runs
+3. Logs: "WiFi credentials: NOT configured"
+4. mqtt_ha_init() fails with ESP_ERR_NOT_FOUND
+5. DL-Bus reading continues (local serial output)
+6. User must provision credentials via:
+   - Future: Web interface / captive portal
+   - Future: Serial console tool
+   - Direct: esptool.py NVS write
+
+NEXT STEPS:
+-----------
+1. Implement webserver for credential provisioning
+2. Add captive portal mode when WiFi not configured
+3. Add serial console provisioning commands
+4. Test version migration on firmware updates
+
+================================================================================

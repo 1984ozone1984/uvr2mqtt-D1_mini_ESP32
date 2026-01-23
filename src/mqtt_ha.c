@@ -2,6 +2,9 @@
  * UVR1611 DL-Bus Reader - MQTT & Home Assistant Integration
  *
  * Implementation of WiFi, MQTT, and Home Assistant auto-discovery
+ *
+ * Security: All credentials are loaded from config_store (NVS) at runtime.
+ * No credentials in source code, headers, or logs.
  */
 
 #include <string.h>
@@ -16,11 +19,10 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_mac.h"
-#include "nvs_flash.h"
 #include "mqtt_client.h"
 
 #include "mqtt_ha.h"
-#include "wifi_config.h"
+#include "config_store.h"
 #include "io_config.h"
 
 static const char *TAG = "MQTT-HA";
@@ -187,8 +189,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
 
             // Publish online status
             char topic[MQTT_TOPIC_MAX_LEN];
-            snprintf(topic, sizeof(topic), "%s/status", MQTT_BASE_TOPIC);
-            esp_mqtt_client_publish(mqtt_client, topic, "online", 0, MQTT_QOS, MQTT_RETAIN_STATUS);
+            snprintf(topic, sizeof(topic), "%s/status", config_get_mqtt_base_topic());
+            esp_mqtt_client_publish(mqtt_client, topic, "online", 0,
+                                    config_get_mqtt_qos(), config_get_mqtt_retain_status());
 
             // Publish discovery on connect
             mqtt_ha_publish_discovery();
@@ -217,6 +220,13 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
 // =============================================================================
 static esp_err_t wifi_init(void)
 {
+    // Check if WiFi credentials are configured
+    if (!config_has_wifi_credentials()) {
+        ESP_LOGE(TAG, "WiFi credentials not configured!");
+        ESP_LOGE(TAG, "Use webserver or serial console to set credentials");
+        return ESP_ERR_NOT_FOUND;
+    }
+
     wifi_event_group = xEventGroupCreate();
 
     ESP_ERROR_CHECK(esp_netif_init());
@@ -233,16 +243,42 @@ static esp_err_t wifi_init(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                     &wifi_event_handler, NULL, &instance_got_ip));
 
+    // Get credentials from config store (secure, never logged)
     wifi_config_t wifi_config = {
         .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASSWORD,
             .threshold.authmode = WIFI_AUTH_WPA2_PSK,
         },
     };
 
+    // Copy SSID and password from config store to wifi_config
+    // These are copied to local buffers and never logged
+    char ssid_buf[CONFIG_WIFI_SSID_MAX_LEN];
+    char pass_buf[CONFIG_WIFI_PASSWORD_MAX_LEN];
+
+    if (config_get_wifi_ssid(ssid_buf, sizeof(ssid_buf)) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to get WiFi SSID");
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    // Password might be empty for open networks
+    if (config_get_wifi_password(pass_buf, sizeof(pass_buf)) != ESP_OK) {
+        pass_buf[0] = '\0';
+        wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+    }
+
+    // Copy to wifi_config (strncpy for safety)
+    strncpy((char *)wifi_config.sta.ssid, ssid_buf, sizeof(wifi_config.sta.ssid) - 1);
+    strncpy((char *)wifi_config.sta.password, pass_buf, sizeof(wifi_config.sta.password) - 1);
+
+    // Clear sensitive data from stack
+    memset(ssid_buf, 0, sizeof(ssid_buf));
+    memset(pass_buf, 0, sizeof(pass_buf));
+
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+
+    // Clear wifi_config passwords from memory after setting
+    memset(wifi_config.sta.password, 0, sizeof(wifi_config.sta.password));
 
     // Disable power save mode to reduce WiFi interrupt frequency
     // This helps DL-Bus timing-critical interrupt handling
@@ -255,6 +291,7 @@ static esp_err_t wifi_init(void)
              "%02X:%02X:%02X:%02X:%02X:%02X",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
+    ESP_LOGI(TAG, "WiFi initialized");
     return ESP_OK;
 }
 
@@ -264,28 +301,42 @@ static esp_err_t wifi_init(void)
 static esp_err_t mqtt_init(void)
 {
     char lwt_topic[MQTT_TOPIC_MAX_LEN];
-    snprintf(lwt_topic, sizeof(lwt_topic), "%s/status", MQTT_BASE_TOPIC);
+    snprintf(lwt_topic, sizeof(lwt_topic), "%s/status", config_get_mqtt_base_topic());
 
+    // Build MQTT config from config store
     esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = MQTT_BROKER_URI,
-        .credentials.client_id = MQTT_CLIENT_ID,
-        .session.keepalive = MQTT_KEEPALIVE_S,
+        .broker.address.uri = config_get_mqtt_broker_uri(),
+        .credentials.client_id = config_get_mqtt_client_id(),
+        .session.keepalive = config_get_mqtt_keepalive(),
         .session.last_will = {
             .topic = lwt_topic,
             .msg = "offline",
             .msg_len = 7,
-            .qos = MQTT_QOS,
-            .retain = MQTT_RETAIN_STATUS,
+            .qos = config_get_mqtt_qos(),
+            .retain = config_get_mqtt_retain_status(),
         },
     };
 
-    // Add credentials if configured
-    if (strlen(MQTT_USERNAME) > 0) {
-        mqtt_cfg.credentials.username = MQTT_USERNAME;
-        mqtt_cfg.credentials.authentication.password = MQTT_PASSWORD;
+    // Add credentials if configured (from NVS, never logged)
+    char mqtt_user[CONFIG_MQTT_USERNAME_MAX_LEN];
+    char mqtt_pass[CONFIG_MQTT_PASSWORD_MAX_LEN];
+
+    if (config_has_mqtt_credentials()) {
+        if (config_get_mqtt_username(mqtt_user, sizeof(mqtt_user)) == ESP_OK) {
+            mqtt_cfg.credentials.username = mqtt_user;
+
+            if (config_get_mqtt_password(mqtt_pass, sizeof(mqtt_pass)) == ESP_OK) {
+                mqtt_cfg.credentials.authentication.password = mqtt_pass;
+            }
+        }
     }
 
     mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
+
+    // Clear sensitive data
+    memset(mqtt_user, 0, sizeof(mqtt_user));
+    memset(mqtt_pass, 0, sizeof(mqtt_pass));
+
     if (mqtt_client == NULL) {
         ESP_LOGE(TAG, "Failed to initialize MQTT client");
         return ESP_FAIL;
@@ -294,6 +345,7 @@ static esp_err_t mqtt_init(void)
     ESP_ERROR_CHECK(esp_mqtt_client_register_event(mqtt_client, ESP_EVENT_ANY_ID,
                     mqtt_event_handler, NULL));
 
+    ESP_LOGI(TAG, "MQTT initialized (broker: %s)", config_get_mqtt_broker_uri());
     return ESP_OK;
 }
 
@@ -305,19 +357,24 @@ esp_err_t mqtt_ha_init(void)
 {
     ESP_LOGI(TAG, "Initializing MQTT and Home Assistant integration");
 
-    // Initialize NVS (required for WiFi)
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
+    // config_store_init() must be called before this function
+    // It handles NVS initialization
+    if (!config_store_is_initialized()) {
+        ESP_LOGE(TAG, "Config store not initialized! Call config_store_init() first");
+        return ESP_ERR_INVALID_STATE;
     }
-    ESP_ERROR_CHECK(ret);
 
     // Initialize WiFi
-    ESP_ERROR_CHECK(wifi_init());
+    esp_err_t err = wifi_init();
+    if (err != ESP_OK) {
+        return err;
+    }
 
     // Initialize MQTT
-    ESP_ERROR_CHECK(mqtt_init());
+    err = mqtt_init();
+    if (err != ESP_OK) {
+        return err;
+    }
 
     ESP_LOGI(TAG, "MQTT-HA initialized");
     return ESP_OK;
@@ -328,18 +385,19 @@ esp_err_t mqtt_ha_start(void)
     ESP_LOGI(TAG, "Starting WiFi...");
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    // Wait for connection
+    // Wait for connection with configurable timeout
+    uint16_t timeout_s = config_get_wifi_timeout();
     EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
                                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
                                            pdFALSE, pdFALSE,
-                                           pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_S * 1000));
+                                           pdMS_TO_TICKS(timeout_s * 1000));
 
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "WiFi connected, starting MQTT...");
         ESP_ERROR_CHECK(esp_mqtt_client_start(mqtt_client));
         return ESP_OK;
     } else {
-        ESP_LOGE(TAG, "WiFi connection failed");
+        ESP_LOGE(TAG, "WiFi connection failed (timeout: %ds)", timeout_s);
         return ESP_FAIL;
     }
 }
@@ -373,6 +431,9 @@ void mqtt_ha_publish_sensors(void)
     char topic[MQTT_TOPIC_MAX_LEN];
     char payload[32];
     char sanitized_name[32];
+    const char *base_topic = config_get_mqtt_base_topic();
+    uint8_t qos = config_get_mqtt_qos();
+    bool retain = config_get_mqtt_retain_sensors();
 
     for (int i = 0; i < NUM_SENSORS; i++) {
         // Skip unused sensors
@@ -389,12 +450,12 @@ void mqtt_ha_publish_sensors(void)
 
         // Create topic
         sanitize_for_topic(sensor_names[i], sanitized_name, sizeof(sanitized_name));
-        snprintf(topic, sizeof(topic), "%s/sensor/%s/state", MQTT_BASE_TOPIC, sanitized_name);
+        snprintf(topic, sizeof(topic), "%s/sensor/%s/state", base_topic, sanitized_name);
 
         // Create payload
         snprintf(payload, sizeof(payload), "%.1f", median);
 
-        esp_mqtt_client_publish(mqtt_client, topic, payload, 0, MQTT_QOS, MQTT_RETAIN_SENSORS);
+        esp_mqtt_client_publish(mqtt_client, topic, payload, 0, qos, retain);
 
         // Clear buffer after publishing
         clear_sensor_buffer(buffer);
@@ -426,9 +487,11 @@ void mqtt_ha_update_output(int output_index, bool is_on)
         char sanitized_name[32];
 
         sanitize_for_topic(output_names[output_index], sanitized_name, sizeof(sanitized_name));
-        snprintf(topic, sizeof(topic), "%s/switch/%s/state", MQTT_BASE_TOPIC, sanitized_name);
+        snprintf(topic, sizeof(topic), "%s/switch/%s/state",
+                 config_get_mqtt_base_topic(), sanitized_name);
 
-        esp_mqtt_client_publish(mqtt_client, topic, is_on ? "ON" : "OFF", 0, MQTT_QOS, MQTT_RETAIN_SENSORS);
+        esp_mqtt_client_publish(mqtt_client, topic, is_on ? "ON" : "OFF", 0,
+                                config_get_mqtt_qos(), config_get_mqtt_retain_sensors());
 
         ESP_LOGI(TAG, "Output %s changed to %s", output_names[output_index], is_on ? "ON" : "OFF");
     }
@@ -444,14 +507,17 @@ void mqtt_ha_publish_outputs(void)
 
     char topic[MQTT_TOPIC_MAX_LEN];
     char sanitized_name[32];
+    const char *base_topic = config_get_mqtt_base_topic();
+    uint8_t qos = config_get_mqtt_qos();
+    bool retain = config_get_mqtt_retain_sensors();
 
     for (int i = 0; i < NUM_OUTPUTS; i++) {
         sanitize_for_topic(output_names[i], sanitized_name, sizeof(sanitized_name));
-        snprintf(topic, sizeof(topic), "%s/switch/%s/state", MQTT_BASE_TOPIC, sanitized_name);
+        snprintf(topic, sizeof(topic), "%s/switch/%s/state", base_topic, sanitized_name);
 
         esp_mqtt_client_publish(mqtt_client, topic,
                                 output_tracker.states[i] ? "ON" : "OFF",
-                                0, MQTT_QOS, MQTT_RETAIN_SENSORS);
+                                0, qos, retain);
     }
 
     ESP_LOGI(TAG, "Published output states");
@@ -484,7 +550,8 @@ void mqtt_ha_update_speed(int speed_index, int value, bool active)
         char sanitized_name[32];
 
         sanitize_for_topic(speed_level_names[speed_index], sanitized_name, sizeof(sanitized_name));
-        snprintf(topic, sizeof(topic), "%s/sensor/%s/state", MQTT_BASE_TOPIC, sanitized_name);
+        snprintf(topic, sizeof(topic), "%s/sensor/%s/state",
+                 config_get_mqtt_base_topic(), sanitized_name);
 
         if (active) {
             snprintf(payload, sizeof(payload), "%d", value);
@@ -492,7 +559,8 @@ void mqtt_ha_update_speed(int speed_index, int value, bool active)
             snprintf(payload, sizeof(payload), "inactive");
         }
 
-        esp_mqtt_client_publish(mqtt_client, topic, payload, 0, MQTT_QOS, MQTT_RETAIN_SENSORS);
+        esp_mqtt_client_publish(mqtt_client, topic, payload, 0,
+                                config_get_mqtt_qos(), config_get_mqtt_retain_sensors());
 
         ESP_LOGI(TAG, "Speed %s changed to %s", speed_level_names[speed_index], payload);
     }
@@ -509,10 +577,13 @@ void mqtt_ha_publish_speeds(void)
     char topic[MQTT_TOPIC_MAX_LEN];
     char payload[16];
     char sanitized_name[32];
+    const char *base_topic = config_get_mqtt_base_topic();
+    uint8_t qos = config_get_mqtt_qos();
+    bool retain = config_get_mqtt_retain_sensors();
 
     for (int i = 0; i < NUM_SPEED_LEVELS; i++) {
         sanitize_for_topic(speed_level_names[i], sanitized_name, sizeof(sanitized_name));
-        snprintf(topic, sizeof(topic), "%s/sensor/%s/state", MQTT_BASE_TOPIC, sanitized_name);
+        snprintf(topic, sizeof(topic), "%s/sensor/%s/state", base_topic, sanitized_name);
 
         if (speed_tracker.active[i]) {
             snprintf(payload, sizeof(payload), "%d", speed_tracker.values[i]);
@@ -520,7 +591,7 @@ void mqtt_ha_publish_speeds(void)
             snprintf(payload, sizeof(payload), "inactive");
         }
 
-        esp_mqtt_client_publish(mqtt_client, topic, payload, 0, MQTT_QOS, MQTT_RETAIN_SENSORS);
+        esp_mqtt_client_publish(mqtt_client, topic, payload, 0, qos, retain);
     }
 }
 
@@ -536,17 +607,20 @@ void mqtt_ha_publish_heat_meter(int meter_index, float power_kw, float energy_kw
 
     char topic[MQTT_TOPIC_MAX_LEN];
     char payload[32];
+    const char *base_topic = config_get_mqtt_base_topic();
+    uint8_t qos = config_get_mqtt_qos();
+    bool retain = config_get_mqtt_retain_sensors();
 
     if (active) {
         // Publish power
-        snprintf(topic, sizeof(topic), "%s/sensor/heat_meter_%d_power/state", MQTT_BASE_TOPIC, meter_index + 1);
+        snprintf(topic, sizeof(topic), "%s/sensor/heat_meter_%d_power/state", base_topic, meter_index + 1);
         snprintf(payload, sizeof(payload), "%.2f", power_kw);
-        esp_mqtt_client_publish(mqtt_client, topic, payload, 0, MQTT_QOS, MQTT_RETAIN_SENSORS);
+        esp_mqtt_client_publish(mqtt_client, topic, payload, 0, qos, retain);
 
         // Publish energy
-        snprintf(topic, sizeof(topic), "%s/sensor/heat_meter_%d_energy/state", MQTT_BASE_TOPIC, meter_index + 1);
+        snprintf(topic, sizeof(topic), "%s/sensor/heat_meter_%d_energy/state", base_topic, meter_index + 1);
         snprintf(payload, sizeof(payload), "%.1f", energy_kwh);
-        esp_mqtt_client_publish(mqtt_client, topic, payload, 0, MQTT_QOS, MQTT_RETAIN_SENSORS);
+        esp_mqtt_client_publish(mqtt_client, topic, payload, 0, qos, retain);
     }
 }
 
@@ -562,22 +636,24 @@ void mqtt_ha_publish_system_info(void)
 
     char topic[MQTT_TOPIC_MAX_LEN];
     char payload[64];
+    const char *base_topic = config_get_mqtt_base_topic();
+    uint8_t qos = config_get_mqtt_qos();
 
     // Update uptime
     system_info.uptime_seconds = xTaskGetTickCount() / configTICK_RATE_HZ;
 
     // Publish MAC address
-    snprintf(topic, sizeof(topic), "%s/system/mac", MQTT_BASE_TOPIC);
-    esp_mqtt_client_publish(mqtt_client, topic, system_info.mac_address, 0, MQTT_QOS, true);
+    snprintf(topic, sizeof(topic), "%s/system/mac", base_topic);
+    esp_mqtt_client_publish(mqtt_client, topic, system_info.mac_address, 0, qos, true);
 
     // Publish IP address
-    snprintf(topic, sizeof(topic), "%s/system/ip", MQTT_BASE_TOPIC);
-    esp_mqtt_client_publish(mqtt_client, topic, system_info.ip_address, 0, MQTT_QOS, true);
+    snprintf(topic, sizeof(topic), "%s/system/ip", base_topic);
+    esp_mqtt_client_publish(mqtt_client, topic, system_info.ip_address, 0, qos, true);
 
     // Publish uptime
-    snprintf(topic, sizeof(topic), "%s/system/uptime", MQTT_BASE_TOPIC);
+    snprintf(topic, sizeof(topic), "%s/system/uptime", base_topic);
     snprintf(payload, sizeof(payload), "%lu", (unsigned long)system_info.uptime_seconds);
-    esp_mqtt_client_publish(mqtt_client, topic, payload, 0, MQTT_QOS, false);
+    esp_mqtt_client_publish(mqtt_client, topic, payload, 0, qos, false);
 
     ESP_LOGI(TAG, "Published system info (uptime: %lus)", (unsigned long)system_info.uptime_seconds);
 }
@@ -599,11 +675,14 @@ static void publish_ha_sensor_discovery(const char *name, const char *device_cla
     char topic[MQTT_TOPIC_MAX_LEN];
     char payload[MQTT_PAYLOAD_MAX_LEN];
     char sanitized_id[32];
+    const char *ha_prefix = config_get_ha_discovery_prefix();
+    const char *base_topic = config_get_mqtt_base_topic();
+    uint8_t qos = config_get_mqtt_qos();
 
     sanitize_for_topic(unique_id, sanitized_id, sizeof(sanitized_id));
 
     snprintf(topic, sizeof(topic), "%s/sensor/%s/%s/config",
-             HA_DISCOVERY_PREFIX, device_id, sanitized_id);
+             ha_prefix, device_id, sanitized_id);
 
     int len = snprintf(payload, sizeof(payload),
         "{"
@@ -630,11 +709,11 @@ static void publish_ha_sensor_discovery(const char *name, const char *device_cla
 
     // Add availability topic
     len += snprintf(payload + len, sizeof(payload) - len,
-        ",\"availability_topic\":\"%s/status\"", MQTT_BASE_TOPIC);
+        ",\"availability_topic\":\"%s/status\"", base_topic);
 
     snprintf(payload + len, sizeof(payload) - len, "}");
 
-    esp_mqtt_client_publish(mqtt_client, topic, payload, 0, MQTT_QOS, true);
+    esp_mqtt_client_publish(mqtt_client, topic, payload, 0, qos, true);
 }
 
 static void publish_ha_binary_sensor_discovery(const char *name, const char *device_class,
@@ -644,11 +723,14 @@ static void publish_ha_binary_sensor_discovery(const char *name, const char *dev
     char topic[MQTT_TOPIC_MAX_LEN];
     char payload[MQTT_PAYLOAD_MAX_LEN];
     char sanitized_id[32];
+    const char *ha_prefix = config_get_ha_discovery_prefix();
+    const char *base_topic = config_get_mqtt_base_topic();
+    uint8_t qos = config_get_mqtt_qos();
 
     sanitize_for_topic(unique_id, sanitized_id, sizeof(sanitized_id));
 
     snprintf(topic, sizeof(topic), "%s/binary_sensor/%s/%s/config",
-             HA_DISCOVERY_PREFIX, device_id, sanitized_id);
+             ha_prefix, device_id, sanitized_id);
 
     snprintf(payload, sizeof(payload),
         "{"
@@ -667,9 +749,9 @@ static void publish_ha_binary_sensor_discovery(const char *name, const char *dev
         "}"
         "}",
         name, state_topic, device_id, sanitized_id, device_class,
-        MQTT_BASE_TOPIC, device_id);
+        base_topic, device_id);
 
-    esp_mqtt_client_publish(mqtt_client, topic, payload, 0, MQTT_QOS, true);
+    esp_mqtt_client_publish(mqtt_client, topic, payload, 0, qos, true);
 }
 
 void mqtt_ha_publish_discovery(void)
@@ -681,6 +763,7 @@ void mqtt_ha_publish_discovery(void)
     char device_id[32];
     char state_topic[MQTT_TOPIC_MAX_LEN];
     char sanitized_name[32];
+    const char *base_topic = config_get_mqtt_base_topic();
 
     get_device_id(device_id, sizeof(device_id));
 
@@ -696,7 +779,7 @@ void mqtt_ha_publish_discovery(void)
 
         sanitize_for_topic(sensor_names[i], sanitized_name, sizeof(sanitized_name));
         snprintf(state_topic, sizeof(state_topic), "%s/sensor/%s/state",
-                 MQTT_BASE_TOPIC, sanitized_name);
+                 base_topic, sanitized_name);
 
         // Determine device class and unit based on sensor name
         const char *device_class = "temperature";
@@ -717,7 +800,7 @@ void mqtt_ha_publish_discovery(void)
     for (int i = 0; i < NUM_OUTPUTS; i++) {
         sanitize_for_topic(output_names[i], sanitized_name, sizeof(sanitized_name));
         snprintf(state_topic, sizeof(state_topic), "%s/switch/%s/state",
-                 MQTT_BASE_TOPIC, sanitized_name);
+                 base_topic, sanitized_name);
 
         // Determine device class based on output name
         const char *device_class = "running";  // Default for pumps
@@ -736,7 +819,7 @@ void mqtt_ha_publish_discovery(void)
     for (int i = 0; i < NUM_SPEED_LEVELS; i++) {
         sanitize_for_topic(speed_level_names[i], sanitized_name, sizeof(sanitized_name));
         snprintf(state_topic, sizeof(state_topic), "%s/sensor/%s/state",
-                 MQTT_BASE_TOPIC, sanitized_name);
+                 base_topic, sanitized_name);
 
         publish_ha_sensor_discovery(speed_level_names[i], "", "%",
                                     state_topic, sanitized_name, device_id);
@@ -751,14 +834,14 @@ void mqtt_ha_publish_discovery(void)
         // Power sensor
         snprintf(name, sizeof(name), "Heat Meter %d Power", i + 1);
         snprintf(state_topic, sizeof(state_topic), "%s/sensor/heat_meter_%d_power/state",
-                 MQTT_BASE_TOPIC, i + 1);
+                 base_topic, i + 1);
         snprintf(sanitized_name, sizeof(sanitized_name), "heat_meter_%d_power", i + 1);
         publish_ha_sensor_discovery(name, "power", "kW", state_topic, sanitized_name, device_id);
 
         // Energy sensor
         snprintf(name, sizeof(name), "Heat Meter %d Energy", i + 1);
         snprintf(state_topic, sizeof(state_topic), "%s/sensor/heat_meter_%d_energy/state",
-                 MQTT_BASE_TOPIC, i + 1);
+                 base_topic, i + 1);
         snprintf(sanitized_name, sizeof(sanitized_name), "heat_meter_%d_energy", i + 1);
         publish_ha_sensor_discovery(name, "energy", "kWh", state_topic, sanitized_name, device_id);
     }
@@ -766,7 +849,7 @@ void mqtt_ha_publish_discovery(void)
     // ==========================================================================
     // System Sensors
     // ==========================================================================
-    snprintf(state_topic, sizeof(state_topic), "%s/system/uptime", MQTT_BASE_TOPIC);
+    snprintf(state_topic, sizeof(state_topic), "%s/system/uptime", base_topic);
     publish_ha_sensor_discovery("UVR1611 Uptime", "duration", "s",
                                 state_topic, "system_uptime", device_id);
 
@@ -786,30 +869,32 @@ void mqtt_ha_loop(void)
 {
     uint32_t now = xTaskGetTickCount() / configTICK_RATE_HZ;
 
-    // Publish sensors on interval
-    if (now - last_sensor_publish >= PUBLISH_INTERVAL_SENSORS_S) {
+    // Publish sensors on interval (from config store)
+    uint16_t sensor_interval = config_get_publish_interval_sensors();
+    if (now - last_sensor_publish >= sensor_interval) {
         mqtt_ha_publish_sensors();
         last_sensor_publish = now;
     }
 
     // Publish outputs on interval (in addition to immediate on change)
-    if (now - last_output_publish >= PUBLISH_INTERVAL_OUTPUTS_S) {
+    uint16_t output_interval = config_get_publish_interval_outputs();
+    if (now - last_output_publish >= output_interval) {
         mqtt_ha_publish_outputs();
         mqtt_ha_publish_speeds();
         last_output_publish = now;
     }
 
     // Publish system info on interval
-    if (now - last_system_publish >= PUBLISH_INTERVAL_SYSTEM_S) {
+    uint16_t system_interval = config_get_publish_interval_system();
+    if (now - last_system_publish >= system_interval) {
         mqtt_ha_publish_system_info();
         last_system_publish = now;
     }
 
-    // Re-publish discovery on interval (if configured)
-    #if HA_DISCOVERY_INTERVAL_S > 0
-    if (now - last_discovery_publish >= HA_DISCOVERY_INTERVAL_S) {
+    // Re-publish discovery on interval (if configured > 0)
+    uint16_t discovery_interval = config_get_ha_discovery_interval();
+    if (discovery_interval > 0 && now - last_discovery_publish >= discovery_interval) {
         mqtt_ha_publish_discovery();
         last_discovery_publish = now;
     }
-    #endif
 }
