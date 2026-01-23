@@ -874,3 +874,214 @@ FILES MODIFIED:
 - src/main.c: Room sensor decoding fix, removed unused code
 
 ================================================================================
+ITERATION 6 - 2026-01-23 (Architecture Analysis for Webserver Feature)
+================================================================================
+
+USER PROMPT:
+------------
+Analyze the current ESP32 project structure.
+- Identify existing modules, headers, and configuration files
+- Identify how WiFi, sensors, outputs, and MQTT are currently handled
+- Identify where io_config.h, wifi_config.h, and Kconfig.projbuild are used
+Do not modify code yet.
+Provide: architecture overview, module boundaries, dependency diagram
+Create new git branch for webserver features
+
+BRANCH CREATED:
+---------------
+git checkout -b feature/webserver-config
+
+=== PROJECT STRUCTURE ANALYSIS ===
+
+FILES:
+------
+src/
+├── main.c              # Main application (1253 lines)
+├── mqtt_ha.c           # MQTT & WiFi implementation (816 lines)
+├── mqtt_ha.h           # MQTT module header
+├── io_config.h         # I/O configuration from Kconfig
+├── wifi_config.h       # WiFi/MQTT credentials (git-ignored)
+├── wifi_config.h.example # Template for wifi_config.h
+├── Kconfig.projbuild   # ESP-IDF menuconfig definitions
+└── CMakeLists.txt      # ESP-IDF build config
+
+Root:
+├── platformio.ini      # PlatformIO build configuration
+├── sdkconfig.d1_mini_esp32 # ESP-IDF generated config
+├── .gitignore          # Excludes wifi_config.h
+└── docs/               # Protocol documentation
+
+=== ARCHITECTURE OVERVIEW ===
+
+The project implements a UVR1611 DL-Bus to MQTT gateway with Home Assistant
+integration. It uses a pipeline architecture for signal processing on a
+D1 Mini ESP32.
+
+CURRENT DATA FLOW:
+------------------
+1. GPIO26 captures DL-Bus signal edges via ISR (pinned to Core 1)
+2. Edge buffer (circular, 2048 entries) holds pulse durations
+3. Bit Extractor task classifies pulses, extracts bits
+4. Manchester Decoder task detects SYNC, assembles 64-byte frames
+5. Frame queue passes valid frames to main task
+6. Main task parses sensors/outputs and publishes via MQTT
+
+CORE ALLOCATION:
+----------------
+- Core 0: WiFi stack, MQTT client, main task
+- Core 1: GPIO ISR, Bit Extractor, Manchester Decoder (timing-critical)
+
+=== MODULE RESPONSIBILITIES ===
+
+1. main.c (DL-Bus Capture & Decode):
+   - GPIO interrupt handler (IRAM, Core 1)
+   - Edge circular buffer management
+   - Bit extraction task (priority MAX-2)
+   - Manchester decoder task (priority MAX-3)
+   - Frame processing & parsing
+   - Sensor/output/speed/heat decoding
+   - Serial output
+   - Statistics tracking
+   - Uses: io_config.h, mqtt_ha.h
+
+2. mqtt_ha.c (Network & MQTT):
+   - NVS flash initialization
+   - WiFi STA mode initialization
+   - WiFi/MQTT event handling
+   - MQTT client with LWT (online/offline)
+   - Sensor value buffering (median calculation)
+   - Output/speed state change detection
+   - MQTT publishing (sensors, outputs, system)
+   - Home Assistant auto-discovery
+   - Publish interval management
+   - Uses: wifi_config.h, io_config.h
+
+3. io_config.h (Configuration Interface):
+   - Maps Kconfig CONFIG_* values to C arrays
+   - SENSOR_NAMES[], OUTPUT_NAMES[], SPEED_LEVEL_NAMES[]
+   - SENSOR_UNITS[] for display formatting
+   - Used by: main.c, mqtt_ha.c
+
+4. wifi_config.h (Credentials & Settings):
+   - WiFi: SSID, password, hostname, timeout
+   - MQTT: broker URI, username, password, client ID
+   - Topics: base topic, HA discovery prefix
+   - Intervals: sensors, outputs, system, discovery
+   - QoS and retain settings
+   - Used by: mqtt_ha.c only
+
+5. Kconfig.projbuild (Menuconfig):
+   - Sensor names S1-S16 with help text
+   - Output names A1-A13 with help text
+   - Speed level names
+   - Sensor unit strings by type
+   - Used by: ESP-IDF build → sdkconfig → io_config.h
+
+=== DEPENDENCY DIAGRAM (TEXTUAL) ===
+
+                    +------------------+
+                    | platformio.ini   |
+                    | (build system)   |
+                    +--------+---------+
+                             |
+                             v
++------------------+  +------+----------+  +------------------+
+| Kconfig.projbuild|->| sdkconfig       |->| io_config.h      |
+| (menuconfig UI)  |  | (generated)     |  | (array macros)   |
++------------------+  +-----------------+  +--------+---------+
+                                                    |
+                      +-----------------------------+
+                      |                             |
+                      v                             v
+           +------------------+          +------------------+
+           | wifi_config.h    |          | main.c           |
+           | (credentials)    |          | - DL-Bus decode  |
+           | - WiFi settings  |          | - Frame parse    |
+           | - MQTT settings  |          | - Sensor arrays  |
+           | - Intervals      |          +--------+---------+
+           +--------+---------+                   |
+                    |                             |
+                    v                             v
+           +------------------+          +------------------+
+           | mqtt_ha.c        |<---------| (function calls) |
+           | - WiFi init      |          | mqtt_ha_init()   |
+           | - MQTT client    |          | mqtt_ha_start()  |
+           | - HA discovery   |          | mqtt_ha_loop()   |
+           | - Publishing     |          | mqtt_ha_add_*()  |
+           +------------------+          +------------------+
+
+=== RECOMMENDED MODULE BOUNDARIES FOR WEBSERVER ===
+
+For adding webserver configuration features, recommend these new modules:
+
+1. NEW: webserver.h / webserver.c
+   - HTTP server initialization (esp_http_server)
+   - Route handlers (GET/POST)
+   - Static file serving (HTML/CSS/JS)
+   - JSON API endpoints for config read/write
+   - Live data endpoints for sensors/outputs
+   - Dependencies: esp_http_server, cJSON
+
+2. NEW: config_storage.h / config_storage.c
+   - NVS-based configuration storage
+   - Read/write WiFi credentials at runtime
+   - Read/write MQTT settings at runtime
+   - Read/write sensor/output names
+   - Configuration validation
+   - Dependencies: nvs_flash
+
+3. NEW: web/ directory (embedded files)
+   - index.html - Configuration UI
+   - style.css - Styles
+   - app.js - Client-side logic
+   - Embed via CMakeLists.txt or xxd
+
+4. MODIFY: wifi_config.h
+   - Add default values for when NVS is empty
+   - Support runtime override from NVS
+
+5. MODIFY: mqtt_ha.c
+   - Add functions to update settings at runtime
+   - Support MQTT reconnect with new settings
+   - Make intervals configurable at runtime
+
+PROPOSED API ENDPOINTS:
+-----------------------
+GET  /                  -> Serve index.html
+GET  /api/status        -> System status JSON (uptime, WiFi, MQTT)
+GET  /api/sensors       -> Live sensor values JSON
+GET  /api/outputs       -> Live output states JSON
+GET  /api/config/wifi   -> WiFi settings JSON
+POST /api/config/wifi   -> Update WiFi settings
+GET  /api/config/mqtt   -> MQTT settings JSON
+POST /api/config/mqtt   -> Update MQTT settings
+GET  /api/config/io     -> Sensor/output names JSON
+POST /api/config/io     -> Update sensor/output names
+POST /api/reboot        -> Restart device
+POST /api/factory-reset -> Clear NVS, restore defaults
+
+PROPOSED FILE STRUCTURE AFTER WEBSERVER:
+----------------------------------------
+src/
+├── main.c              # Unchanged (DL-Bus core)
+├── mqtt_ha.c/h         # Add: runtime config update functions
+├── io_config.h         # Unchanged (Kconfig defaults)
+├── wifi_config.h       # Add: NVS fallback defaults
+├── webserver.c/h       # NEW: HTTP server & REST API
+├── config_storage.c/h  # NEW: NVS config management
+├── web/
+│   ├── index.html      # Configuration UI
+│   ├── style.css       # Styles
+│   └── app.js          # Client-side JavaScript
+├── Kconfig.projbuild   # Add: webserver enable/port options
+└── CMakeLists.txt      # Add: embed web files, new sources
+
+=== CURRENT LIMITATIONS TO ADDRESS ===
+
+1. Hardcoded credentials: wifi_config.h requires rebuild to change
+2. No runtime configuration: All settings fixed at compile time
+3. No web interface: Configuration requires menuconfig + rebuild
+4. No OTA updates: Firmware updates require physical access
+5. No captive portal: Can't configure WiFi without existing connection
+
+================================================================================
