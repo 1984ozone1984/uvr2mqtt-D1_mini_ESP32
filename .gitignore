@@ -33,6 +33,13 @@ src/wifi_config.h
 # Logs
 *.log
 
+# Node.js (not part of ESP32 project)
+node_modules/
+package.json
+bun.lock
+tsconfig.json
+*.ts
+
 # Keep prompt_history.txt but ignore other txt files in root
 # (commented out to allow tracking prompt_history.txt)
 # *.txt

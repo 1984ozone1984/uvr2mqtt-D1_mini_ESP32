@@ -27,9 +27,11 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "driver/gpio.h"
+#include "esp_intr_alloc.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_rom_sys.h"
+#include "soc/gpio_struct.h"
 #include "io_config.h"
 #include "mqtt_ha.h"
 
@@ -84,13 +86,15 @@ static const char *sensor_units[NUM_SENSOR_TYPES] = SENSOR_UNITS;
 // =============================================================================
 #define BIT_DURATION_US     2048        // One bit = 2.048 ms
 #define HALF_BIT_US         1024        // Half bit = 1.024 ms
-#define TOLERANCE_US        200         // Timing tolerance
+#define TOLERANCE_US        350         // Timing tolerance (increased for WiFi interference)
 
 // Pulse classification thresholds
-#define SHORT_PULSE_MIN     (HALF_BIT_US - TOLERANCE_US)    // ~824 us
-#define SHORT_PULSE_MAX     (HALF_BIT_US + TOLERANCE_US)    // ~1224 us
-#define LONG_PULSE_MIN      (BIT_DURATION_US - TOLERANCE_US) // ~1848 us
-#define LONG_PULSE_MAX      (BIT_DURATION_US + TOLERANCE_US) // ~2248 us
+// With 350us tolerance: SHORT=674-1374us, LONG=1698-2398us, gap=1374-1698us
+#define SHORT_PULSE_MIN     (HALF_BIT_US - TOLERANCE_US)    // ~674 us
+#define SHORT_PULSE_MAX     (HALF_BIT_US + TOLERANCE_US)    // ~1374 us
+#define LONG_PULSE_MIN      (BIT_DURATION_US - TOLERANCE_US) // ~1698 us
+#define LONG_PULSE_MAX      (BIT_DURATION_US + TOLERANCE_US) // ~2398 us
+#define PULSE_MIDPOINT      ((SHORT_PULSE_MAX + LONG_PULSE_MIN) / 2) // ~1536 us
 
 // =============================================================================
 // Frame Configuration
@@ -181,6 +185,7 @@ static volatile uint32_t stat_gaps_detected = 0;
 static volatile uint32_t stat_short_pulses = 0;
 static volatile uint32_t stat_long_pulses = 0;
 static volatile uint32_t stat_invalid_pulses = 0;
+static volatile uint32_t stat_midgap_pulses = 0;  // Pulses classified by proximity (WiFi jitter)
 
 // Debug: last frame bit count
 static volatile uint32_t debug_last_frame_bits = 0;
@@ -219,21 +224,6 @@ static inline bool edge_buffer_is_empty(edge_buffer_t *eb)
     return eb->head == eb->tail;
 }
 
-// Add edge to buffer (producer side - ISR safe with mutex)
-static bool edge_buffer_put(edge_buffer_t *eb, uint16_t duration, uint8_t level)
-{
-    if (edge_buffer_is_full(eb)) {
-        return false;  // Buffer overflow
-    }
-
-    uint32_t next_head = (eb->head + 1) % EDGE_BUFFER_SIZE;
-    eb->buffer[eb->head].duration = duration;
-    eb->buffer[eb->head].level = level;
-    eb->head = next_head;
-
-    return true;
-}
-
 // Get edge from buffer (consumer side)
 static bool edge_buffer_get(edge_buffer_t *eb, edge_t *edge)
 {
@@ -258,6 +248,11 @@ static pulse_type_t classify_pulse(uint32_t duration_us)
         return PULSE_SHORT;
     } else if (duration_us >= LONG_PULSE_MIN && duration_us <= LONG_PULSE_MAX) {
         return PULSE_LONG;
+    } else if (duration_us > SHORT_PULSE_MAX && duration_us < LONG_PULSE_MIN) {
+        // Pulse in the gap between short and long - classify by proximity
+        // This handles WiFi-induced timing jitter
+        stat_midgap_pulses++;
+        return (duration_us < PULSE_MIDPOINT) ? PULSE_SHORT : PULSE_LONG;
     }
     return PULSE_INVALID;
 }
@@ -277,7 +272,9 @@ static pulse_type_t classify_pulse(uint32_t duration_us)
 static void IRAM_ATTR gpio_isr_handler(void *arg)
 {
     int64_t now = esp_timer_get_time();
-    int level = gpio_get_level(DL_BUS_GPIO);
+    // Use direct register read instead of gpio_get_level() - IRAM safe
+    // gpio_get_level() accesses flash and causes cache errors during NVS/WiFi init
+    int level = (GPIO.in >> DL_BUS_GPIO) & 1;
     int64_t prev = last_edge_time;
 
     last_edge_time = now;
@@ -300,15 +297,32 @@ static void IRAM_ATTR gpio_isr_handler(void *arg)
     }
 }
 
+// Interrupt handle for dedicated GPIO interrupt
+static intr_handle_t gpio_intr_handle = NULL;
+
+/**
+ * Dedicated GPIO ISR - handles the raw GPIO interrupt directly
+ * This bypasses the gpio_isr_service dispatcher for lower latency
+ */
+static void IRAM_ATTR gpio_dedicated_isr(void *arg)
+{
+    // Clear the interrupt status for our GPIO (GPIO26 is in the lower 32 GPIOs)
+    GPIO.status_w1tc = (1ULL << DL_BUS_GPIO);
+
+    // Call our handler
+    gpio_isr_handler(arg);
+}
+
 /**
  * Initialize GPIO interrupt for DL-Bus capture
+ * Uses dedicated interrupt (not shared ISR service) for lower latency
  * ISR is pinned to Core 1 to avoid WiFi interference (WiFi runs on Core 0)
  */
 static esp_err_t init_gpio_capture(void)
 {
     ESP_LOGI(TAG, "Initializing GPIO interrupt capture on GPIO%d (Core 1)", DL_BUS_GPIO);
 
-    // Configure GPIO
+    // Configure GPIO for input with interrupt
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << DL_BUS_GPIO),
         .mode = GPIO_MODE_INPUT,
@@ -318,20 +332,27 @@ static esp_err_t init_gpio_capture(void)
     };
     ESP_ERROR_CHECK(gpio_config(&io_conf));
 
-    // Install GPIO ISR service with high priority, pinned to Core 1
-    // ESP_INTR_FLAG_IRAM: ISR in IRAM for fast execution
-    // ESP_INTR_FLAG_LEVEL3: High priority interrupt
+    // Allocate dedicated interrupt on Core 1 with high priority
+    // ESP_INTR_FLAG_IRAM: ISR in IRAM for fast execution during flash operations
+    // ESP_INTR_FLAG_LEVEL3: High priority (level 4+ requires assembly handlers)
+    // Pinned to Core 1 via xTaskCreatePinnedToCore context (called from Core 1 task)
     int intr_flags = ESP_INTR_FLAG_IRAM | ESP_INTR_FLAG_LEVEL3;
-    ESP_ERROR_CHECK(gpio_install_isr_service(intr_flags));
 
-    // Add handler for our GPIO
-    ESP_ERROR_CHECK(gpio_isr_handler_add(DL_BUS_GPIO, gpio_isr_handler, NULL));
+    esp_err_t ret = esp_intr_alloc(ETS_GPIO_INTR_SOURCE, intr_flags,
+                                   gpio_dedicated_isr, NULL, &gpio_intr_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to allocate GPIO interrupt: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Enable interrupt for our GPIO pin
+    ESP_ERROR_CHECK(gpio_intr_enable(DL_BUS_GPIO));
 
     // Initialize timing
     last_edge_time = 0;
-    last_level = gpio_get_level(DL_BUS_GPIO);
+    last_level = (GPIO.in >> DL_BUS_GPIO) & 1;
 
-    ESP_LOGI(TAG, "GPIO interrupt capture initialized");
+    ESP_LOGI(TAG, "GPIO dedicated interrupt capture initialized");
     return ESP_OK;
 }
 
@@ -443,6 +464,9 @@ typedef enum {
     DECODER_STATE_IN_BYTE,
 } decoder_state_t;
 
+// Maximum stop bit errors before abandoning frame
+#define MAX_STOP_BIT_ERRORS 8
+
 static void manchester_decoder_task(void *arg)
 {
     ESP_LOGI(TAG, "Manchester decoder task started");
@@ -456,6 +480,7 @@ static void manchester_decoder_task(void *arg)
     bool invert_data = false;   // If SYNC was zeros, invert subsequent data
     dlbus_frame_t frame;
     uint32_t total_bits_in_frame = 0;  // Debug: count all bits since SYNC
+    int stop_bit_errors = 0;    // Count of stop bit errors in current frame
 
     bit_entry_t bit;
 
@@ -502,6 +527,7 @@ static void manchester_decoder_task(void *arg)
                     current_byte = 0;
                     invert_data = false;
                     total_bits_in_frame = 0;
+                    stop_bit_errors = 0;
                     memset(&frame, 0, sizeof(frame));
                     consecutive_ones = 0;
                     consecutive_zeros = 0;
@@ -514,6 +540,7 @@ static void manchester_decoder_task(void *arg)
                     current_byte = 0;
                     invert_data = true;  // Invert all subsequent bits
                     total_bits_in_frame = 0;
+                    stop_bit_errors = 0;
                     memset(&frame, 0, sizeof(frame));
                     consecutive_ones = 0;
                     consecutive_zeros = 0;
@@ -558,8 +585,20 @@ static void manchester_decoder_task(void *arg)
                 } else {
                     // Stop bit (bit_index == 9) - should be 1
                     if (bit_val != 1) {
-                        ESP_LOGW(TAG, "Bad stop bit at byte %d (0x%02X)", byte_index, current_byte);
-                        // Continue anyway, might be noise
+                        stop_bit_errors++;
+                        if (stop_bit_errors <= 3) {
+                            // Only log first few errors to avoid log spam
+                            ESP_LOGW(TAG, "Bad stop bit at byte %d (0x%02X)", byte_index, current_byte);
+                        }
+                        // Check if too many errors - abandon frame
+                        if (stop_bit_errors >= MAX_STOP_BIT_ERRORS) {
+                            ESP_LOGW(TAG, "Too many stop bit errors (%d), abandoning frame at byte %d",
+                                     stop_bit_errors, byte_index);
+                            state = DECODER_STATE_HUNTING_SYNC;
+                            consecutive_ones = 0;
+                            consecutive_zeros = 0;
+                            break;
+                        }
                     }
 
                     // Byte complete
@@ -638,7 +677,8 @@ static const char* get_sensor_unit(uint8_t sensor_type)
  *
  * Encoding per type:
  * - Temperature (0x20): 12-bit signed value in low byte + bits 0-3 of high byte
- * - Room sensor (0x70): 8-bit value in low byte only (bits 0-3 of high byte = mode)
+ * - Room sensor (0x70): 9-bit signed value in low byte + bit 0 of high byte
+ *                       (bits 1-3 of high byte = operating mode)
  * - Flow (0x30): 12-bit unsigned value × 4 l/h
  * - Radiation (0x60): 12-bit unsigned value in W/m²
  */
@@ -667,12 +707,13 @@ static float decode_sensor_value(uint8_t low_byte, uint8_t high_byte, bool *vali
         }
 
         case SENSOR_TYPE_ROOM: {
-            // Room sensor: 8-bit value in low byte only
-            // Bits 0-3 of high byte contain operating mode, not temperature data
+            // Room sensor: 9-bit value (low byte + bit 0 of high byte)
+            // Bits 1-3 of high byte contain operating mode, not temperature data
             // Bit 7 of high byte is sign bit
-            int16_t raw_value = low_byte;
+            // Range: -51.1°C to +51.1°C (values -511 to +511)
+            int16_t raw_value = low_byte | ((high_byte & 0x01) << 8);
             if (high_byte & 0x80) {
-                raw_value = raw_value - 256;  // 8-bit two's complement
+                raw_value = raw_value - 512;  // 9-bit two's complement
             }
             return raw_value / 10.0f;
         }
@@ -1036,6 +1077,32 @@ static void init_gpio_for_debug(void)
 
 
 // =============================================================================
+// Core 1 Initialization Task
+// =============================================================================
+
+// Semaphore to signal Core 1 init completion
+static SemaphoreHandle_t core1_init_done = NULL;
+static esp_err_t core1_init_result = ESP_OK;
+
+/**
+ * Task that runs on Core 1 to initialize the GPIO interrupt
+ * This ensures the interrupt is allocated on Core 1, away from WiFi (Core 0)
+ */
+static void core1_init_task(void *arg)
+{
+    ESP_LOGI(TAG, "Core 1 init task started on core %d", xPortGetCoreID());
+
+    // Initialize GPIO interrupt capture on Core 1
+    core1_init_result = init_gpio_capture();
+
+    // Signal completion
+    xSemaphoreGive(core1_init_done);
+
+    // Delete this task
+    vTaskDelete(NULL);
+}
+
+// =============================================================================
 // Main Application
 // =============================================================================
 
@@ -1078,8 +1145,14 @@ void app_main(void)
         return;
     }
 
-    // Initialize GPIO interrupt capture
-    ESP_ERROR_CHECK(init_gpio_capture());
+    // Initialize GPIO interrupt on Core 1 (away from WiFi on Core 0)
+    // This requires running init code on Core 1 since esp_intr_alloc pins to current core
+    core1_init_done = xSemaphoreCreateBinary();
+    xTaskCreatePinnedToCore(core1_init_task, "core1_init", 2048, NULL,
+                            configMAX_PRIORITIES - 1, NULL, 1);
+    xSemaphoreTake(core1_init_done, portMAX_DELAY);
+    vSemaphoreDelete(core1_init_done);
+    ESP_ERROR_CHECK(core1_init_result);
 
     // Create DL-Bus tasks PINNED TO CORE 1 (WiFi runs on Core 0)
     // This prevents WiFi interrupts from interfering with timing-critical DL-Bus decoding
@@ -1141,9 +1214,9 @@ void app_main(void)
         if ((now - last_stats_time) >= pdMS_TO_TICKS(10000)) {
             printf("\n--- Pipeline Statistics (GPIO Interrupt) ---\n");
             printf("  Edges captured:  %lu\n", (unsigned long)stat_edges_received);
-            printf("  Pulses: short=%lu, long=%lu, invalid=%lu\n",
+            printf("  Pulses: short=%lu, long=%lu, midgap=%lu, invalid=%lu\n",
                    (unsigned long)stat_short_pulses, (unsigned long)stat_long_pulses,
-                   (unsigned long)stat_invalid_pulses);
+                   (unsigned long)stat_midgap_pulses, (unsigned long)stat_invalid_pulses);
             printf("  Gaps detected:   %lu\n", (unsigned long)stat_gaps_detected);
             printf("  Bits extracted:  %lu\n", (unsigned long)stat_bits_extracted);
             printf("  Last frame bits: %lu (need %d)\n", (unsigned long)debug_last_frame_bits, FRAME_BYTES * 10);
