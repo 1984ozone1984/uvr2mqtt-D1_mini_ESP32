@@ -1233,3 +1233,110 @@ NEXT STEPS:
 4. Test version migration on firmware updates
 
 ================================================================================
+ITERATION 8 - 2026-01-24 (Web Configuration & WiFi STA/AP Mode)
+================================================================================
+
+USER PROMPT:
+------------
+Implement web-based configuration interface with WiFi AP mode fallback for
+initial device setup.
+
+WHAT WAS DONE:
+--------------
+
+1. Created WiFi Manager Module:
+   - src/wifi_manager.h: Public API for WiFi management
+   - src/wifi_manager.c: Implementation with STA/AP mode switching
+
+   WiFi Manager Features:
+   - Attempts STA mode connection on boot with stored credentials
+   - Falls back to AP mode if no credentials or connection fails
+   - AP mode SSID: "UVR1611-XXXXXX" (XXXXXX = last 6 chars of MAC)
+   - AP mode IP: 192.168.4.1
+   - mDNS support for hostname.local access
+   - Reconnection support after saving new credentials
+
+2. Created Webserver Module:
+   - src/webserver.h: Public API for HTTP server
+   - src/webserver.c: Implementation with embedded HTML UI
+
+   Webserver Features:
+   - Built-in HTML/CSS configuration interface
+   - Status page with live sensor/output data
+   - WiFi configuration form
+   - MQTT configuration form
+   - REST API endpoints for JSON data
+   - Works in both STA and AP modes
+
+   Endpoints:
+   - GET /          -> Main status page (HTML)
+   - GET /api/status -> System status JSON
+   - GET /api/sensors -> Live sensor values JSON
+   - GET /api/outputs -> Output states JSON
+   - POST /api/config/wifi -> Save WiFi settings
+   - POST /api/config/mqtt -> Save MQTT settings
+   - POST /api/reboot -> Restart device
+
+3. Fixed Kconfig bool handling:
+   - MQTT retain options were not working correctly
+   - Fixed bool to int conversion in config_store.c
+
+4. Updated main.c:
+   - Integrated wifi_manager and webserver initialization
+   - DL-Bus reading continues regardless of WiFi mode
+   - MQTT only starts when in STA mode with connection
+
+ARCHITECTURE CHANGES:
+---------------------
+
+Before (Iteration 7):
+  app_main() -> mqtt_ha_init() -> WiFi STA only -> MQTT
+
+After (Iteration 8):
+  app_main() -> wifi_manager_init() -> wifi_manager_start()
+             -> webserver_start()
+             |
+             +-> If STA connected: mqtt_ha_init() -> MQTT publishing
+             +-> If AP mode: Web UI only, no MQTT
+
+NEW FILES:
+----------
+- src/wifi_manager.h: WiFi manager API
+- src/wifi_manager.c: WiFi STA/AP management (~400 lines)
+- src/webserver.h: Webserver API
+- src/webserver.c: HTTP server with embedded UI (~800 lines)
+
+MODIFIED FILES:
+---------------
+- src/main.c: Integrated new modules
+- src/config_store.c: Fixed bool handling for retain options
+- src/Kconfig.projbuild: Fixed bool defaults
+
+FIRST BOOT EXPERIENCE (FINAL):
+------------------------------
+1. Flash firmware to ESP32
+2. Device boots, no credentials -> starts AP mode
+3. Serial log shows: "Starting AP mode: UVR1611-XXXXXX"
+4. User connects phone/laptop to "UVR1611-XXXXXX" network
+5. Open http://192.168.4.1 in browser
+6. Configure WiFi SSID, password, MQTT broker, etc.
+7. Click Save -> device stores settings in NVS
+8. Device reboots, connects to configured WiFi (STA mode)
+9. MQTT publishing starts, Home Assistant discovers entities
+10. Web UI accessible at http://hostname.local or device IP
+
+PHASE 3 STATUS: COMPLETE
+------------------------
+All webserver configuration features implemented:
+- [x] HTTP server for settings UI
+- [x] NVS-based runtime configuration
+- [x] REST API for config read/write
+- [x] Live sensor/output data display
+- [x] WiFi STA/AP mode with auto-fallback
+- [x] mDNS hostname resolution
+
+MERGED TO MAIN:
+---------------
+Pull request #1 (feature/webserver-config) merged to main.
+
+================================================================================

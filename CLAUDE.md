@@ -29,7 +29,11 @@ GPIO26 ISR -> Edge Buffer (2048) -> Bit Extractor Task -> Bit Queue (1024)
 | `src/main.c` | DL-Bus capture, decode, frame parsing |
 | `src/config_store.c` | NVS-backed configuration storage (secrets + settings) |
 | `src/config_store.h` | Configuration API (thread-safe, secure) |
-| `src/mqtt_ha.c` | WiFi, MQTT, Home Assistant discovery |
+| `src/wifi_manager.c` | WiFi STA/AP mode management with auto-fallback |
+| `src/wifi_manager.h` | WiFi manager public API |
+| `src/webserver.c` | HTTP server for web-based configuration UI |
+| `src/webserver.h` | Webserver public API |
+| `src/mqtt_ha.c` | MQTT client, Home Assistant discovery |
 | `src/mqtt_ha.h` | MQTT module public API |
 | `src/io_config.h` | Sensor/output name arrays from Kconfig |
 | `src/Kconfig.projbuild` | ESP-IDF menuconfig definitions |
@@ -76,11 +80,30 @@ esp_err_t config_set_wifi_credentials(const char *ssid, const char *pass);
 Since credentials are not in source code, they must be provisioned:
 
 1. Build and flash firmware
-2. Device starts but WiFi/MQTT fail (no credentials)
-3. Use one of these methods to set credentials:
-   - Web interface (when implemented)
-   - Serial console provisioning tool
-   - Direct NVS write via esptool
+2. Device starts in AP mode (no credentials configured)
+3. Connect to WiFi network "UVR1611-XXXXXX" (XXXXXX = last 6 chars of MAC)
+4. Open http://192.168.4.1 in browser
+5. Configure WiFi credentials and MQTT settings via web UI
+6. Device saves settings to NVS and reboots
+7. Device connects to configured WiFi in STA mode
+8. Access web UI via http://hostname.local or IP address
+
+## WiFi Manager
+
+The device supports two WiFi modes with automatic fallback:
+
+**STA Mode (Station)**:
+- Connects to configured WiFi network
+- Provides mDNS at hostname.local
+- MQTT publishing active
+- Web UI accessible on local network
+
+**AP Mode (Access Point)**:
+- Activates when no credentials or connection fails
+- SSID: "UVR1611-XXXXXX" (XXXXXX = MAC suffix)
+- IP: 192.168.4.1
+- Web UI for initial configuration
+- DL-Bus reading continues (local only)
 
 ## Kconfig Options (Non-Secret)
 
@@ -126,13 +149,24 @@ uvr1611/system/ip           -> IP address
 uvr1611/system/uptime       -> Uptime seconds
 ```
 
-## Current Branch: feature/webserver-config
+## Web Configuration Interface
 
-Adding web-based configuration interface:
-- HTTP server for settings UI
-- NVS-based runtime configuration (DONE)
-- REST API for config read/write
-- Live sensor/output data display
+The device provides a web-based configuration UI:
+
+**Endpoints**:
+- `GET /` - Main status page with sensor/output data
+- `GET /api/status` - System status JSON
+- `GET /api/sensors` - Live sensor values JSON
+- `GET /api/outputs` - Live output states JSON
+- `POST /api/config/wifi` - Update WiFi settings
+- `POST /api/config/mqtt` - Update MQTT settings
+- `POST /api/reboot` - Restart device
+
+**Features**:
+- Real-time sensor and output display
+- WiFi and MQTT configuration forms
+- Settings saved to NVS (persist across reboots)
+- Works in both STA and AP modes
 
 ## Development Notes
 

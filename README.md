@@ -30,23 +30,39 @@ ESP32-based gateway that reads data from a Technische Alternative UVR1611 solar 
 - Median filtering for sensor values
 - Immediate publish on output state changes
 
+### Web Configuration
+- Built-in web UI for configuration (no rebuild required)
+- WiFi STA/AP mode with automatic fallback
+- Configure WiFi and MQTT settings via browser
+- Live sensor and output status display
+- Settings stored in NVS (persist across reboots)
+
 ## Configuration
 
-### WiFi & MQTT Settings
+### First Boot Setup (Web UI)
 
-Copy the example configuration file:
-```bash
-cp src/wifi_config.h.example src/wifi_config.h
-```
+1. Flash the firmware to your ESP32
+2. Device starts in AP mode (no credentials yet)
+3. Connect to WiFi network **"UVR1611-XXXXXX"** (XXXXXX = last 6 chars of MAC address)
+4. Open http://192.168.4.1 in your browser
+5. Configure WiFi credentials and MQTT settings
+6. Device saves settings and reboots
+7. Device connects to your WiFi network
+8. Access web UI via **http://uvr1611-gateway.local** or the device IP
 
-Edit `src/wifi_config.h` with your settings:
-```c
-#define WIFI_SSID               "your-wifi-ssid"
-#define WIFI_PASSWORD           "your-wifi-password"
-#define MQTT_BROKER_URI         "mqtt://192.168.1.100:1883"
-#define MQTT_USERNAME           "mqtt-user"
-#define MQTT_PASSWORD           "mqtt-password"
-```
+### WiFi Modes
+
+**STA Mode (Normal Operation)**:
+- Connects to your configured WiFi network
+- MQTT publishing active
+- Web UI accessible at hostname.local
+
+**AP Mode (Configuration/Fallback)**:
+- Activates when no credentials or connection fails
+- SSID: "UVR1611-XXXXXX"
+- IP: 192.168.4.1
+- Configure via web browser
+- DL-Bus reading continues locally
 
 ### Sensor & Output Names
 
@@ -132,11 +148,13 @@ WiFi/MQTT (Core 0) ◄───────────────────�
 
 ## Status
 
-**Phase 1 & 2 Complete**:
+**Phase 1, 2 & 3 Complete**:
 - DL-Bus decoding: 0% error rate
 - All sensor types parsed correctly
 - MQTT publishing working
 - Home Assistant auto-discovery working
+- Web-based configuration UI working
+- WiFi STA/AP mode with auto-fallback working
 
 ## License
 
