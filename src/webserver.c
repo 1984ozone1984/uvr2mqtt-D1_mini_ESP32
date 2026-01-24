@@ -11,6 +11,8 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_ota_ops.h"
+#include "esp_app_format.h"
 #include "cJSON.h"
 
 #include "webserver.h"
@@ -55,6 +57,8 @@ static const char HTML_HEADER[] =
     "button:hover{background:#0056b3;}"
     "button.danger{background:#dc3545;}"
     "button.danger:hover{background:#c82333;}"
+    "button.warn{background:#ffc107;color:#212529;}"
+    "button.warn:hover{background:#e0a800;}"
     ".status{padding:10px;border-radius:4px;margin:10px 0;}"
     ".status.ok{background:#d4edda;color:#155724;}"
     ".status.warn{background:#fff3cd;color:#856404;}"
@@ -353,6 +357,35 @@ static esp_err_t config_handler(httpd_req_t *req)
         "</div>");
     p += n; remaining -= n;
 
+    // OTA Update Card
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+    n = snprintf(p, remaining,
+        "<div class=\"card\">"
+        "<h2>Firmware Update</h2>"
+        "<p>Current version: <strong>%s</strong> (built %s %s)</p>"
+        "<label>Select firmware file (.bin)</label>"
+        "<input type=\"file\" id=\"fwfile\" accept=\".bin\">"
+        "<p class=\"info\">Upload a new firmware binary. The device will restart automatically after the update.</p>"
+        "<div id=\"progress\" style=\"display:none;\"><div class=\"status warn\">Uploading... <span id=\"pct\">0</span>%%</div></div>"
+        "<button type=\"button\" class=\"warn\" onclick=\"uploadFW()\">Upload &amp; Update Firmware</button>"
+        "<script>"
+        "function uploadFW(){"
+        "var f=document.getElementById('fwfile').files[0];"
+        "if(!f){alert('Please select a firmware file');return;}"
+        "if(!f.name.endsWith('.bin')){alert('Please select a .bin file');return;}"
+        "document.getElementById('progress').style.display='block';"
+        "var xhr=new XMLHttpRequest();"
+        "xhr.open('POST','/ota',true);"
+        "xhr.setRequestHeader('Content-Type','application/octet-stream');"
+        "xhr.upload.onprogress=function(e){if(e.lengthComputable){document.getElementById('pct').textContent=Math.round(e.loaded/e.total*100);}};"
+        "xhr.onload=function(){if(xhr.status==200){document.body.innerHTML=xhr.responseText;}else{alert('Update failed: '+xhr.responseText);document.getElementById('progress').style.display='none';}};"
+        "xhr.onerror=function(){alert('Upload failed');document.getElementById('progress').style.display='none';};"
+        "xhr.send(f);}"
+        "</script>"
+        "</div>",
+        app_desc->version, app_desc->date, app_desc->time);
+    p += n; remaining -= n;
+
     // Reboot Card
     n = snprintf(p, remaining,
         "<div class=\"card\">"
@@ -578,6 +611,128 @@ static esp_err_t reboot_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+static esp_err_t ota_update_handler(httpd_req_t *req)
+{
+    esp_ota_handle_t ota_handle = 0;
+    const esp_partition_t *update_partition = NULL;
+    esp_err_t err;
+    char *buf = NULL;
+    int received;
+    int remaining = req->content_len;
+    bool header_checked = false;
+
+    ESP_LOGI(TAG, "OTA update started, size: %d bytes", remaining);
+
+    // Get the next OTA partition to write to
+    update_partition = esp_ota_get_next_update_partition(NULL);
+    if (update_partition == NULL) {
+        ESP_LOGE(TAG, "No OTA partition found");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No OTA partition available");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Writing to partition: %s at offset 0x%lx",
+             update_partition->label, (unsigned long)update_partition->address);
+
+    // Allocate buffer for receiving data
+    buf = malloc(4096);
+    if (!buf) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory allocation failed");
+        return ESP_FAIL;
+    }
+
+    // Begin OTA update
+    err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_begin failed: %s", esp_err_to_name(err));
+        free(buf);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin failed");
+        return ESP_FAIL;
+    }
+
+    // Receive and write firmware data
+    while (remaining > 0) {
+        received = httpd_req_recv(req, buf, MIN(remaining, 4096));
+        if (received <= 0) {
+            if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+                continue;  // Retry on timeout
+            }
+            ESP_LOGE(TAG, "File receive failed");
+            esp_ota_abort(ota_handle);
+            free(buf);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "File receive failed");
+            return ESP_FAIL;
+        }
+
+        // Check firmware header on first chunk
+        if (!header_checked && received >= sizeof(esp_image_header_t)) {
+            esp_image_header_t *header = (esp_image_header_t *)buf;
+            if (header->magic != ESP_IMAGE_HEADER_MAGIC) {
+                ESP_LOGE(TAG, "Invalid firmware image (bad magic)");
+                esp_ota_abort(ota_handle);
+                free(buf);
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid firmware file");
+                return ESP_FAIL;
+            }
+            header_checked = true;
+        }
+
+        // Write chunk to flash
+        err = esp_ota_write(ota_handle, buf, received);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_ota_write failed: %s", esp_err_to_name(err));
+            esp_ota_abort(ota_handle);
+            free(buf);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Flash write failed");
+            return ESP_FAIL;
+        }
+
+        remaining -= received;
+        ESP_LOGD(TAG, "OTA progress: %d bytes remaining", remaining);
+    }
+
+    free(buf);
+
+    // Finish OTA update
+    err = esp_ota_end(ota_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_end failed: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA validation failed");
+        return ESP_FAIL;
+    }
+
+    // Set the new partition as boot partition
+    err = esp_ota_set_boot_partition(update_partition);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_ota_set_boot_partition failed: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to set boot partition");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "OTA update successful! Rebooting...");
+
+    // Send success response
+    char response[2560];
+    snprintf(response, sizeof(response),
+        "%s%s<h1>Firmware Update Complete</h1>"
+        "<div class=\"card\">"
+        "<div class=\"status ok\">Firmware uploaded successfully!</div>"
+        "<p>Device is restarting with the new firmware...</p>"
+        "</div>"
+        "<script>setTimeout(function(){window.location='/';},15000);</script>"
+        "%s",
+        HTML_HEADER, HTML_NAV, HTML_FOOTER);
+
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+
+    // Delay to allow response to be sent, then reboot
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+
+    return ESP_OK;
+}
+
 // =============================================================================
 // API Handlers
 // =============================================================================
@@ -712,6 +867,13 @@ esp_err_t webserver_start(void)
         .handler = reboot_handler,
     };
     httpd_register_uri_handler(server, &reboot_uri);
+
+    httpd_uri_t ota_uri = {
+        .uri = "/ota",
+        .method = HTTP_POST,
+        .handler = ota_update_handler,
+    };
+    httpd_register_uri_handler(server, &ota_uri);
 
     httpd_uri_t api_status_uri = {
         .uri = "/api/status",
