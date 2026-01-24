@@ -15,6 +15,7 @@
 #include "esp_app_format.h"
 #include "cJSON.h"
 
+
 #include "webserver.h"
 #include "wifi_manager.h"
 #include "config_store.h"
@@ -652,7 +653,8 @@ static esp_err_t ota_update_handler(httpd_req_t *req)
 
     // Receive and write firmware data
     while (remaining > 0) {
-        received = httpd_req_recv(req, buf, MIN(remaining, 4096));
+        size_t chunk = remaining < 4096 ? remaining : 4096;
+        received = httpd_req_recv(req, buf, chunk);
         if (received <= 0) {
             if (received == HTTPD_SOCK_ERR_TIMEOUT) {
                 continue;  // Retry on timeout
