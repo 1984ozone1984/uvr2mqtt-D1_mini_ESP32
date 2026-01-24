@@ -37,6 +37,26 @@ ESP32-based gateway that reads data from a Technische Alternative UVR1611 solar 
 - Live sensor and output status display
 - Settings stored in NVS (persist across reboots)
 
+## Screenshots
+
+### Web Interface - Status Page
+![Status Overview](pictures/Overviw.jpeg)
+
+### Live Sensor Data
+![Sensors](pictures/Sensors.jpeg)
+
+### Output States
+![Outputs](pictures/Outputs.jpeg)
+
+### WiFi Configuration
+![WiFi Settings](pictures/Wifi_Settings.jpeg)
+
+### MQTT Configuration
+![MQTT Settings](pictures/MQTT_Settings.jpeg)
+
+### Home Assistant Integration
+![Home Assistant](pictures/HA_MQTT.jpeg)
+
 ## Configuration
 
 ### First Boot Setup (Web UI)
