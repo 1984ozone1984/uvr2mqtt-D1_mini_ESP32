@@ -1,4 +1,113 @@
-menu "UVR1611 I/O Configuration"
+menu "UVR1611 Configuration"
+
+    menu "Device Settings"
+        config UVR_HOSTNAME
+            string "Device Hostname"
+            default "uvr1611-gateway"
+            help
+                Hostname for mDNS (device.local)
+
+        config UVR_DLBUS_GPIO
+            int "DL-Bus GPIO Pin"
+            default 26
+            range 0 39
+            help
+                GPIO pin connected to DL-Bus data line
+
+        config UVR_WIFI_TIMEOUT
+            int "WiFi Connection Timeout (seconds)"
+            default 30
+            range 5 120
+            help
+                Timeout for WiFi connection attempts
+    endmenu
+
+    menu "MQTT Settings (non-secret)"
+        comment "NOTE: Credentials are stored in NVS only, not here"
+
+        config UVR_MQTT_BROKER_URI
+            string "MQTT Broker URI"
+            default "mqtt://192.168.1.100:1883"
+            help
+                MQTT broker URI (mqtt:// or mqtts://)
+                Example: mqtt://192.168.1.100:1883
+
+        config UVR_MQTT_CLIENT_ID
+            string "MQTT Client ID"
+            default "uvr1611_gateway"
+            help
+                Unique identifier for this MQTT client
+
+        config UVR_MQTT_BASE_TOPIC
+            string "MQTT Base Topic"
+            default "uvr1611"
+            help
+                Base topic for all published data
+
+        config UVR_HA_DISCOVERY_PREFIX
+            string "Home Assistant Discovery Prefix"
+            default "homeassistant"
+            help
+                Topic prefix for HA auto-discovery
+
+        config UVR_MQTT_KEEPALIVE
+            int "MQTT Keepalive (seconds)"
+            default 60
+            range 10 600
+            help
+                MQTT keepalive interval
+
+        config UVR_MQTT_QOS
+            int "MQTT QoS Level"
+            default 1
+            range 0 2
+            help
+                MQTT Quality of Service (0, 1, or 2)
+
+        config UVR_MQTT_RETAIN_SENSORS
+            bool "Retain Sensor Messages"
+            default n
+            help
+                Enable retain flag for sensor values
+
+        config UVR_MQTT_RETAIN_STATUS
+            bool "Retain Status Messages"
+            default y
+            help
+                Enable retain flag for status (LWT)
+    endmenu
+
+    menu "Publish Intervals"
+        config UVR_PUBLISH_INTERVAL_SENSORS
+            int "Sensor Publish Interval (seconds)"
+            default 30
+            range 1 3600
+            help
+                Interval for publishing sensor values (median)
+
+        config UVR_PUBLISH_INTERVAL_OUTPUTS
+            int "Output Publish Interval (seconds)"
+            default 30
+            range 1 3600
+            help
+                Interval for periodic output state publishing
+                (changes are published immediately)
+
+        config UVR_PUBLISH_INTERVAL_SYSTEM
+            int "System Info Publish Interval (seconds)"
+            default 60
+            range 1 3600
+            help
+                Interval for publishing system information
+
+        config UVR_HA_DISCOVERY_INTERVAL
+            int "HA Discovery Republish Interval (seconds)"
+            default 300
+            range 0 3600
+            help
+                Interval for republishing HA discovery
+                Set to 0 to publish only on startup
+    endmenu
 
     menu "Sensor Names (S1-S16)"
         config SENSOR_S1_NAME

@@ -580,3 +580,656 @@ NEXT STEPS:
 4. OTA updates (Phase 3)
 
 ================================================================================
+ITERATION 4 - 2026-01-22 (MQTT & Home Assistant Integration)
+================================================================================
+
+USER PROMPT:
+------------
+"Let's proceed with MQTT. Therefore make a new Github branch. I want to have my
+wifi settings, hostname and mqtt settings in a config file which is not uploaded
+to github - please add an example file instead all with esp-idf best known method.
+Also add Homeassistant autodiscovery. I want to publish the Sensor values every
+30 seconds (publish intervals should be set in config file) The value to be
+published should be the median of the values received until last publish.
+For the pump readings publish immediately when the value changes or on publish
+interval. Also publish Mac and IP address via MQTT. And add Mqtt Status so that
+homeassistant knows the on/offline status"
+
+WHAT WAS DONE:
+--------------
+
+1. Created new Git branch: feature/mqtt-homeassistant
+
+2. Created WiFi/MQTT Configuration System:
+   - src/wifi_config.h.example: Template with all settings (excluded from git)
+   - Added src/wifi_config.h to .gitignore to protect credentials
+
+   Configuration options in wifi_config.h:
+   - WIFI_SSID, WIFI_PASSWORD
+   - DEVICE_HOSTNAME
+   - MQTT_BROKER_URI, MQTT_USERNAME, MQTT_PASSWORD
+   - MQTT_BASE_TOPIC, HA_DISCOVERY_PREFIX
+   - PUBLISH_INTERVAL_SENSORS_S (default: 30s)
+   - PUBLISH_INTERVAL_OUTPUTS_S (default: 30s)
+   - PUBLISH_INTERVAL_SYSTEM_S (default: 60s)
+   - HA_DISCOVERY_INTERVAL_S (default: 300s)
+   - MQTT_QOS, MQTT_RETAIN settings
+
+3. Created MQTT & Home Assistant Module:
+
+   src/mqtt_ha.h - Header with:
+   - Sensor buffer structure for median calculation
+   - Output/speed state tracking structures
+   - System info structure (MAC, IP, uptime)
+   - Function declarations for all MQTT operations
+
+   src/mqtt_ha.c - Implementation with:
+   - WiFi connection with retry logic
+   - MQTT client with Last Will and Testament (LWT) for online/offline status
+   - Median calculation using qsort for sensor values
+   - Change detection for outputs (publish immediately on change)
+   - Change detection for speed levels (publish immediately on change)
+   - Home Assistant auto-discovery for all entities:
+     * Temperature sensors with device_class
+     * Flow sensors
+     * Binary sensors for outputs (pumps, valves, mixers)
+     * Speed level sensors
+     * Heat meter power and energy sensors
+     * System uptime sensor
+   - System info publishing (MAC, IP, uptime)
+   - Configurable publish intervals
+
+4. Updated main.c:
+   - Added mqtt_ha.h include
+   - Added process_frame_for_mqtt() function that:
+     * Extracts sensor values and adds to median buffer
+     * Updates output states (triggers immediate publish on change)
+     * Updates speed levels (triggers immediate publish on change)
+     * Publishes heat meter data
+   - Modified app_main() to initialize MQTT/WiFi on startup
+   - Modified main loop to:
+     * Process frames for MQTT
+     * Call mqtt_ha_loop() for interval-based publishing
+     * Show MQTT connection status in statistics
+
+MQTT TOPIC STRUCTURE:
+---------------------
+uvr1611/status                      -> "online" / "offline" (LWT)
+uvr1611/sensor/{name}/state         -> Sensor value (median)
+uvr1611/switch/{name}/state         -> "ON" / "OFF"
+uvr1611/sensor/heat_meter_1_power/state -> Power in kW
+uvr1611/sensor/heat_meter_1_energy/state -> Energy in kWh
+uvr1611/system/mac                  -> MAC address
+uvr1611/system/ip                   -> IP address
+uvr1611/system/uptime               -> Uptime in seconds
+
+HOME ASSISTANT DISCOVERY:
+-------------------------
+Auto-discovery messages published to:
+homeassistant/sensor/{device_id}/{sensor_id}/config
+homeassistant/binary_sensor/{device_id}/{output_id}/config
+
+Features:
+- Device grouping (all entities under "UVR1611 Gateway")
+- Proper device_class for temperature, power, energy
+- Availability based on uvr1611/status topic
+- Unique IDs for each entity
+
+PUBLISH BEHAVIOR:
+-----------------
+- Sensors: Median of all samples since last publish, every 30s (configurable)
+- Outputs: Immediately on state change, also every 30s
+- Speed levels: Immediately on change, also every 30s
+- Heat meters: Every frame (if active)
+- System info: Every 60s (configurable)
+- HA discovery: On connect, then every 300s (configurable)
+
+FILES CREATED/MODIFIED:
+-----------------------
+- src/wifi_config.h.example (new): Configuration template
+- src/mqtt_ha.h (new): MQTT module header
+- src/mqtt_ha.c (new): MQTT module implementation (~650 lines)
+- src/main.c (modified): MQTT integration
+- .gitignore (modified): Added src/wifi_config.h
+
+USAGE:
+------
+1. Copy wifi_config.h.example to wifi_config.h
+2. Edit wifi_config.h with your WiFi and MQTT credentials
+3. Build and flash
+4. Device will connect to WiFi, then MQTT
+5. Home Assistant will auto-discover all entities
+
+NEXT STEPS:
+-----------
+1. Test on hardware with actual MQTT broker
+2. Fine-tune publish intervals if needed
+3. Add OTA updates (Phase 3)
+4. Consider adding web configuration interface
+
+================================================================================
+ITERATION 5 - 2026-01-23 (WiFi Interference Fix)
+================================================================================
+
+USER PROMPT:
+------------
+[User provided device monitor output showing two issues:]
+1. "Guru Meditation Error: Core 0 panic'ed (Cache error). Cache disabled but
+   cached memory region accessed" - Crash during NVS flash init
+2. After fixing crash: DL-Bus reading became unreliable with >90% error rate
+   (was <1% before WiFi/MQTT implementation)
+   - Many "Bad stop bit" errors throughout frames
+   - Corrupted data, invalid checksums
+
+PROBLEMS IDENTIFIED:
+--------------------
+
+Problem 1: Cache Error Crash
+- GPIO ISR called gpio_get_level() which accesses flash memory
+- During nvs_flash_init(), flash cache is disabled for read operations
+- When GPIO interrupt fired during NVS init, ISR tried to access flash → crash
+
+Problem 2: WiFi Timing Interference
+- WiFi interrupts cause variable latency in GPIO ISR execution
+- Pulse duration measurements were getting stretched/compressed
+- Bit boundary detection was off, causing "bad stop bit" errors
+- Statistics showed short:long pulse ratio of 3.25:1 (should be ~1:1)
+
+FIXES APPLIED:
+--------------
+
+1. IRAM-Safe GPIO Read (main.c):
+   - Added: #include "soc/gpio_struct.h"
+   - Changed ISR from: int level = gpio_get_level(DL_BUS_GPIO);
+   - To direct register: int level = (GPIO.in >> DL_BUS_GPIO) & 1;
+   - Direct register access is IRAM-safe (no flash access needed)
+
+2. Increased Timing Tolerance (main.c):
+   - TOLERANCE_US: 200us → 350us
+   - SHORT_PULSE: 674-1374us (was 824-1224us)
+   - LONG_PULSE: 1698-2398us (was 1848-2248us)
+   - Added PULSE_MIDPOINT (1536us) for gap classification
+
+3. Mid-Gap Pulse Classification (main.c):
+   - Pulses between SHORT_PULSE_MAX and LONG_PULSE_MIN are now classified
+     by proximity (closer to short → short, closer to long → long)
+   - This handles WiFi-induced timing jitter gracefully
+   - Added stat_midgap_pulses counter to track WiFi interference level
+
+4. Dedicated GPIO Interrupt (main.c):
+   - Replaced gpio_install_isr_service() + gpio_isr_handler_add() with
+     direct esp_intr_alloc() for lower latency
+   - Created gpio_dedicated_isr() that clears interrupt and calls handler
+   - Removes ISR dispatcher overhead
+
+5. GPIO Interrupt Pinned to Core 1 (main.c):
+   - Added core1_init_task() that runs on Core 1
+   - esp_intr_alloc() pins interrupts to calling core
+   - GPIO interrupt now runs on Core 1, away from WiFi (Core 0)
+   - Uses semaphore to synchronize initialization
+
+6. WiFi Power Save Disabled (mqtt_ha.c):
+   - Added: ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+   - Disables WiFi power save mode
+   - Reduces periodic WiFi interrupts that cause timing jitter
+
+7. Early Frame Rejection (main.c):
+   - Added MAX_STOP_BIT_ERRORS (8) threshold
+   - Frames with too many stop bit errors are abandoned early
+   - Only first 3 stop bit errors per frame are logged (reduces spam)
+   - Added stop_bit_errors counter reset on SYNC detection
+
+STATISTICS UPDATE:
+------------------
+- Statistics now show: "Pulses: short=X, long=Y, midgap=Z, invalid=W"
+- midgap count indicates how much WiFi jitter is being compensated
+
+FILES MODIFIED:
+---------------
+- src/main.c:
+  * Added soc/gpio_struct.h and esp_intr_alloc.h includes
+  * Added PULSE_MIDPOINT constant
+  * Added stat_midgap_pulses counter
+  * Added gpio_intr_handle variable
+  * Added gpio_dedicated_isr() function
+  * Modified init_gpio_capture() for dedicated interrupt
+  * Added core1_init_task() for Core 1 interrupt allocation
+  * Modified classify_pulse() with mid-gap classification
+  * Modified manchester_decoder_task() with stop_bit_errors tracking
+  * Updated statistics printout with midgap count
+  * Modified app_main() to init GPIO interrupt from Core 1
+
+- src/mqtt_ha.c:
+  * Added esp_wifi_set_ps(WIFI_PS_NONE) after WiFi config
+
+TECHNICAL DETAILS:
+------------------
+ESP32 has two cores:
+- Core 0: Handles WiFi/BT protocol stack, causes frequent interrupts
+- Core 1: Available for application, more predictable timing
+
+GPIO interrupt priorities:
+- Level 1-3: Can be handled by C code
+- Level 4-5: Require assembly handlers
+- We use Level 3 (highest practical for C code)
+
+WiFi interference sources:
+- WiFi power save causes periodic wake/sleep cycles
+- WiFi TX/RX interrupts have high priority
+- Flash operations during WiFi credentials access
+
+RESULTS:
+--------
+- Error rate: 0.00% (all frames valid)
+- MQTT connected and publishing
+- WiFi interference successfully mitigated
+- Only 1-2 midgap pulses per ~90,000 edges (negligible jitter)
+
+================================================================================
+ITERATION 5.1 - 2026-01-23 (Room Sensor Fix & Code Cleanup)
+================================================================================
+
+USER FEEDBACK:
+--------------
+"S5 Temp.Raum shows 0.7 C in reality it has 26.1"
+
+PROBLEM:
+--------
+Room sensor showing 0.5-0.7°C instead of actual 26.1°C.
+- Value 261 (26.1°C) requires 9 bits
+- Previous fix only read 8 bits (low byte), giving 5 (0.5°C)
+- Missing bit 8 (the 256)
+
+ROOT CAUSE ANALYSIS:
+--------------------
+Room sensor encoding uses 9 bits, not 8:
+- Low byte (8 bits) + bit 0 of high byte (1 bit) = 9 bits
+- Bits 1-3 of high byte contain operating mode (not temperature)
+- Range: -51.1°C to +51.1°C (values -511 to +511)
+
+The original bug (iteration 3) was reading 12 bits which included mode bits.
+The fix went too far by only reading 8 bits.
+
+FIX APPLIED:
+------------
+Changed SENSOR_TYPE_ROOM decoding in main.c:
+- OLD: int16_t raw_value = low_byte;
+- NEW: int16_t raw_value = low_byte | ((high_byte & 0x01) << 8);
+- Two's complement adjusted from 256 to 512 for 9-bit values
+
+CODE CLEANUP:
+-------------
+1. Removed unused edge_buffer_put() function (was causing compiler warning)
+2. Simplified gpio_dedicated_isr() - removed unnecessary branch for GPIO >= 32
+   (GPIO26 is always < 32, branch was causing shift-count-negative warning)
+
+VERIFICATION:
+-------------
+- S5 Temp.Raum now correctly shows 26.1°C
+- No compiler warnings
+- 0% error rate maintained
+
+FILES MODIFIED:
+---------------
+- src/main.c: Room sensor decoding fix, removed unused code
+
+================================================================================
+ITERATION 6 - 2026-01-23 (Architecture Analysis for Webserver Feature)
+================================================================================
+
+USER PROMPT:
+------------
+Analyze the current ESP32 project structure.
+- Identify existing modules, headers, and configuration files
+- Identify how WiFi, sensors, outputs, and MQTT are currently handled
+- Identify where io_config.h, wifi_config.h, and Kconfig.projbuild are used
+Do not modify code yet.
+Provide: architecture overview, module boundaries, dependency diagram
+Create new git branch for webserver features
+
+BRANCH CREATED:
+---------------
+git checkout -b feature/webserver-config
+
+=== PROJECT STRUCTURE ANALYSIS ===
+
+FILES:
+------
+src/
+├── main.c              # Main application (1253 lines)
+├── mqtt_ha.c           # MQTT & WiFi implementation (816 lines)
+├── mqtt_ha.h           # MQTT module header
+├── io_config.h         # I/O configuration from Kconfig
+├── wifi_config.h       # WiFi/MQTT credentials (git-ignored)
+├── wifi_config.h.example # Template for wifi_config.h
+├── Kconfig.projbuild   # ESP-IDF menuconfig definitions
+└── CMakeLists.txt      # ESP-IDF build config
+
+Root:
+├── platformio.ini      # PlatformIO build configuration
+├── sdkconfig.d1_mini_esp32 # ESP-IDF generated config
+├── .gitignore          # Excludes wifi_config.h
+└── docs/               # Protocol documentation
+
+=== ARCHITECTURE OVERVIEW ===
+
+The project implements a UVR1611 DL-Bus to MQTT gateway with Home Assistant
+integration. It uses a pipeline architecture for signal processing on a
+D1 Mini ESP32.
+
+CURRENT DATA FLOW:
+------------------
+1. GPIO26 captures DL-Bus signal edges via ISR (pinned to Core 1)
+2. Edge buffer (circular, 2048 entries) holds pulse durations
+3. Bit Extractor task classifies pulses, extracts bits
+4. Manchester Decoder task detects SYNC, assembles 64-byte frames
+5. Frame queue passes valid frames to main task
+6. Main task parses sensors/outputs and publishes via MQTT
+
+CORE ALLOCATION:
+----------------
+- Core 0: WiFi stack, MQTT client, main task
+- Core 1: GPIO ISR, Bit Extractor, Manchester Decoder (timing-critical)
+
+=== MODULE RESPONSIBILITIES ===
+
+1. main.c (DL-Bus Capture & Decode):
+   - GPIO interrupt handler (IRAM, Core 1)
+   - Edge circular buffer management
+   - Bit extraction task (priority MAX-2)
+   - Manchester decoder task (priority MAX-3)
+   - Frame processing & parsing
+   - Sensor/output/speed/heat decoding
+   - Serial output
+   - Statistics tracking
+   - Uses: io_config.h, mqtt_ha.h
+
+2. mqtt_ha.c (Network & MQTT):
+   - NVS flash initialization
+   - WiFi STA mode initialization
+   - WiFi/MQTT event handling
+   - MQTT client with LWT (online/offline)
+   - Sensor value buffering (median calculation)
+   - Output/speed state change detection
+   - MQTT publishing (sensors, outputs, system)
+   - Home Assistant auto-discovery
+   - Publish interval management
+   - Uses: wifi_config.h, io_config.h
+
+3. io_config.h (Configuration Interface):
+   - Maps Kconfig CONFIG_* values to C arrays
+   - SENSOR_NAMES[], OUTPUT_NAMES[], SPEED_LEVEL_NAMES[]
+   - SENSOR_UNITS[] for display formatting
+   - Used by: main.c, mqtt_ha.c
+
+4. wifi_config.h (Credentials & Settings):
+   - WiFi: SSID, password, hostname, timeout
+   - MQTT: broker URI, username, password, client ID
+   - Topics: base topic, HA discovery prefix
+   - Intervals: sensors, outputs, system, discovery
+   - QoS and retain settings
+   - Used by: mqtt_ha.c only
+
+5. Kconfig.projbuild (Menuconfig):
+   - Sensor names S1-S16 with help text
+   - Output names A1-A13 with help text
+   - Speed level names
+   - Sensor unit strings by type
+   - Used by: ESP-IDF build → sdkconfig → io_config.h
+
+=== DEPENDENCY DIAGRAM (TEXTUAL) ===
+
+                    +------------------+
+                    | platformio.ini   |
+                    | (build system)   |
+                    +--------+---------+
+                             |
+                             v
++------------------+  +------+----------+  +------------------+
+| Kconfig.projbuild|->| sdkconfig       |->| io_config.h      |
+| (menuconfig UI)  |  | (generated)     |  | (array macros)   |
++------------------+  +-----------------+  +--------+---------+
+                                                    |
+                      +-----------------------------+
+                      |                             |
+                      v                             v
+           +------------------+          +------------------+
+           | wifi_config.h    |          | main.c           |
+           | (credentials)    |          | - DL-Bus decode  |
+           | - WiFi settings  |          | - Frame parse    |
+           | - MQTT settings  |          | - Sensor arrays  |
+           | - Intervals      |          +--------+---------+
+           +--------+---------+                   |
+                    |                             |
+                    v                             v
+           +------------------+          +------------------+
+           | mqtt_ha.c        |<---------| (function calls) |
+           | - WiFi init      |          | mqtt_ha_init()   |
+           | - MQTT client    |          | mqtt_ha_start()  |
+           | - HA discovery   |          | mqtt_ha_loop()   |
+           | - Publishing     |          | mqtt_ha_add_*()  |
+           +------------------+          +------------------+
+
+=== RECOMMENDED MODULE BOUNDARIES FOR WEBSERVER ===
+
+For adding webserver configuration features, recommend these new modules:
+
+1. NEW: webserver.h / webserver.c
+   - HTTP server initialization (esp_http_server)
+   - Route handlers (GET/POST)
+   - Static file serving (HTML/CSS/JS)
+   - JSON API endpoints for config read/write
+   - Live data endpoints for sensors/outputs
+   - Dependencies: esp_http_server, cJSON
+
+2. NEW: config_storage.h / config_storage.c
+   - NVS-based configuration storage
+   - Read/write WiFi credentials at runtime
+   - Read/write MQTT settings at runtime
+   - Read/write sensor/output names
+   - Configuration validation
+   - Dependencies: nvs_flash
+
+3. NEW: web/ directory (embedded files)
+   - index.html - Configuration UI
+   - style.css - Styles
+   - app.js - Client-side logic
+   - Embed via CMakeLists.txt or xxd
+
+4. MODIFY: wifi_config.h
+   - Add default values for when NVS is empty
+   - Support runtime override from NVS
+
+5. MODIFY: mqtt_ha.c
+   - Add functions to update settings at runtime
+   - Support MQTT reconnect with new settings
+   - Make intervals configurable at runtime
+
+PROPOSED API ENDPOINTS:
+-----------------------
+GET  /                  -> Serve index.html
+GET  /api/status        -> System status JSON (uptime, WiFi, MQTT)
+GET  /api/sensors       -> Live sensor values JSON
+GET  /api/outputs       -> Live output states JSON
+GET  /api/config/wifi   -> WiFi settings JSON
+POST /api/config/wifi   -> Update WiFi settings
+GET  /api/config/mqtt   -> MQTT settings JSON
+POST /api/config/mqtt   -> Update MQTT settings
+GET  /api/config/io     -> Sensor/output names JSON
+POST /api/config/io     -> Update sensor/output names
+POST /api/reboot        -> Restart device
+POST /api/factory-reset -> Clear NVS, restore defaults
+
+PROPOSED FILE STRUCTURE AFTER WEBSERVER:
+----------------------------------------
+src/
+├── main.c              # Unchanged (DL-Bus core)
+├── mqtt_ha.c/h         # Add: runtime config update functions
+├── io_config.h         # Unchanged (Kconfig defaults)
+├── wifi_config.h       # Add: NVS fallback defaults
+├── webserver.c/h       # NEW: HTTP server & REST API
+├── config_storage.c/h  # NEW: NVS config management
+├── web/
+│   ├── index.html      # Configuration UI
+│   ├── style.css       # Styles
+│   └── app.js          # Client-side JavaScript
+├── Kconfig.projbuild   # Add: webserver enable/port options
+└── CMakeLists.txt      # Add: embed web files, new sources
+
+=== CURRENT LIMITATIONS TO ADDRESS ===
+
+1. Hardcoded credentials: wifi_config.h requires rebuild to change
+2. No runtime configuration: All settings fixed at compile time
+3. No web interface: Configuration requires menuconfig + rebuild
+4. No OTA updates: Firmware updates require physical access
+5. No captive portal: Can't configure WiFi without existing connection
+
+================================================================================
+ITERATION 7 - 2026-01-23 (Configuration Storage Abstraction)
+================================================================================
+
+USER PROMPT:
+------------
+Implement Task 1: Configuration Storage Abstraction
+- Create central, secure configuration storage layer backed by NVS
+- Separate non-secret config (safe to commit) from secret config (NVS only)
+- WiFi and MQTT credentials must NEVER appear in source code, headers, Kconfig,
+  sdkconfig, logs, or any committed files
+- All application code must read configuration through this layer
+
+WHAT WAS DONE:
+--------------
+
+1. Created config_store module:
+   - src/config_store.h: Public API with security guarantees
+   - src/config_store.c: NVS-backed implementation (~700 lines)
+
+2. Security implementation:
+   - Two NVS namespaces: "uvr_config" (settings) and "uvr_secret" (credentials)
+   - Secret getters copy to caller-provided buffers (never return internal pointers)
+   - Secrets cleared from memory after use (memset to 0)
+   - Logging never reveals credential values ("WiFi credentials stored" not the actual SSID)
+
+3. Configuration precedence:
+   - Non-secrets: Load Kconfig default, then apply NVS override if present
+   - Secrets: NVS only, NO Kconfig defaults (must be provisioned at runtime)
+
+4. Updated Kconfig.projbuild:
+   - Added Device Settings menu: hostname, GPIO, WiFi timeout
+   - Added MQTT Settings menu: broker URI, client ID, topics, QoS, retain
+   - Added Publish Intervals menu: sensors, outputs, system, discovery
+   - Comment clearly states credentials are NOT here
+
+5. Updated mqtt_ha.c:
+   - Removed #include "wifi_config.h"
+   - Added #include "config_store.h"
+   - wifi_init(): Gets credentials from config_store (copy to local buffer, then clear)
+   - mqtt_init(): Gets settings from config_store
+   - All MQTT_* macros replaced with config_get_*() function calls
+   - Credentials cleared from stack after passing to ESP-IDF APIs
+
+6. Updated main.c:
+   - Added config_store_init() call before mqtt_ha_init()
+   - Added #include "config_store.h"
+
+7. Removed obsolete files:
+   - Deleted src/wifi_config.h (contained hardcoded credentials)
+   - Deleted src/wifi_config.h.example (no longer needed)
+
+8. Updated CLAUDE.md with new architecture and security model
+
+FILES CREATED:
+--------------
+- src/config_store.h (300 lines): Configuration API
+- src/config_store.c (700 lines): NVS implementation
+
+FILES MODIFIED:
+---------------
+- src/mqtt_ha.c: Use config_store instead of wifi_config.h
+- src/main.c: Initialize config_store at startup
+- src/Kconfig.projbuild: Added non-secret configuration menus
+- CLAUDE.md: Updated architecture documentation
+
+FILES DELETED:
+--------------
+- src/wifi_config.h: Contained hardcoded credentials (security risk)
+- src/wifi_config.h.example: No longer needed
+
+=== CONFIGURATION STORAGE ARCHITECTURE ===
+
+NVS Namespace: "uvr_config" (Non-Secrets)
+-----------------------------------------
+Key              | Type   | Kconfig Default
+-----------------|--------|------------------
+version          | u8     | CONFIG_VERSION (1)
+hostname         | str    | CONFIG_UVR_HOSTNAME
+mqtt_uri         | str    | CONFIG_UVR_MQTT_BROKER_URI
+mqtt_client      | str    | CONFIG_UVR_MQTT_CLIENT_ID
+mqtt_topic       | str    | CONFIG_UVR_MQTT_BASE_TOPIC
+ha_prefix        | str    | CONFIG_UVR_HA_DISCOVERY_PREFIX
+int_sensors      | u16    | CONFIG_UVR_PUBLISH_INTERVAL_SENSORS
+int_outputs      | u16    | CONFIG_UVR_PUBLISH_INTERVAL_OUTPUTS
+int_system       | u16    | CONFIG_UVR_PUBLISH_INTERVAL_SYSTEM
+int_disc         | u16    | CONFIG_UVR_HA_DISCOVERY_INTERVAL
+wifi_timeout     | u16    | CONFIG_UVR_WIFI_TIMEOUT
+dlbus_gpio       | u8     | CONFIG_UVR_DLBUS_GPIO
+mqtt_keep        | u16    | CONFIG_UVR_MQTT_KEEPALIVE
+mqtt_qos         | u8     | CONFIG_UVR_MQTT_QOS
+mqtt_ret_s       | u8     | CONFIG_UVR_MQTT_RETAIN_SENSORS
+mqtt_ret_st      | u8     | CONFIG_UVR_MQTT_RETAIN_STATUS
+
+NVS Namespace: "uvr_secret" (Credentials - NO Kconfig defaults!)
+----------------------------------------------------------------
+Key              | Type   | Notes
+-----------------|--------|------------------
+wifi_ssid        | str    | WiFi network name
+wifi_pass        | str    | WiFi password
+mqtt_user        | str    | MQTT username
+mqtt_pass        | str    | MQTT password
+
+=== HOW SECRETS ARE PROTECTED ===
+
+1. No compile-time storage:
+   - No #define for SSID/password anywhere
+   - No Kconfig defaults for credentials
+   - Not in sdkconfig or any generated files
+
+2. Secure API design:
+   - config_get_wifi_ssid(buffer, len) copies to caller buffer
+   - Never returns const char* to internal storage
+   - Buffer size checked, null-terminated
+
+3. Memory hygiene:
+   - After copying to ESP-IDF wifi_config_t, clear stack buffers
+   - memset(pass_buf, 0, sizeof(pass_buf)) immediately after use
+
+4. Logging safety:
+   - Only log "WiFi credentials stored" not the actual values
+   - Log broker URI (non-secret) but not username/password
+
+5. Version migration:
+   - Config version stored in NVS
+   - On version mismatch: reset non-secrets, keep secrets
+
+=== FIRST BOOT EXPERIENCE ===
+
+Since credentials are no longer in source code:
+
+1. Flash firmware
+2. Device boots, config_store_init() runs
+3. Logs: "WiFi credentials: NOT configured"
+4. mqtt_ha_init() fails with ESP_ERR_NOT_FOUND
+5. DL-Bus reading continues (local serial output)
+6. User must provision credentials via:
+   - Future: Web interface / captive portal
+   - Future: Serial console tool
+   - Direct: esptool.py NVS write
+
+NEXT STEPS:
+-----------
+1. Implement webserver for credential provisioning
+2. Add captive portal mode when WiFi not configured
+3. Add serial console provisioning commands
+4. Test version migration on firmware updates
+
+================================================================================

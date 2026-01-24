@@ -27,10 +27,16 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "driver/gpio.h"
+#include "esp_intr_alloc.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_rom_sys.h"
+#include "soc/gpio_struct.h"
 #include "io_config.h"
+#include "config_store.h"
+#include "mqtt_ha.h"
+#include "wifi_manager.h"
+#include "webserver.h"
 
 static const char *TAG = "DL-BUS";
 
@@ -83,13 +89,15 @@ static const char *sensor_units[NUM_SENSOR_TYPES] = SENSOR_UNITS;
 // =============================================================================
 #define BIT_DURATION_US     2048        // One bit = 2.048 ms
 #define HALF_BIT_US         1024        // Half bit = 1.024 ms
-#define TOLERANCE_US        200         // Timing tolerance
+#define TOLERANCE_US        350         // Timing tolerance (increased for WiFi interference)
 
 // Pulse classification thresholds
-#define SHORT_PULSE_MIN     (HALF_BIT_US - TOLERANCE_US)    // ~824 us
-#define SHORT_PULSE_MAX     (HALF_BIT_US + TOLERANCE_US)    // ~1224 us
-#define LONG_PULSE_MIN      (BIT_DURATION_US - TOLERANCE_US) // ~1848 us
-#define LONG_PULSE_MAX      (BIT_DURATION_US + TOLERANCE_US) // ~2248 us
+// With 350us tolerance: SHORT=674-1374us, LONG=1698-2398us, gap=1374-1698us
+#define SHORT_PULSE_MIN     (HALF_BIT_US - TOLERANCE_US)    // ~674 us
+#define SHORT_PULSE_MAX     (HALF_BIT_US + TOLERANCE_US)    // ~1374 us
+#define LONG_PULSE_MIN      (BIT_DURATION_US - TOLERANCE_US) // ~1698 us
+#define LONG_PULSE_MAX      (BIT_DURATION_US + TOLERANCE_US) // ~2398 us
+#define PULSE_MIDPOINT      ((SHORT_PULSE_MAX + LONG_PULSE_MIN) / 2) // ~1536 us
 
 // =============================================================================
 // Frame Configuration
@@ -180,6 +188,7 @@ static volatile uint32_t stat_gaps_detected = 0;
 static volatile uint32_t stat_short_pulses = 0;
 static volatile uint32_t stat_long_pulses = 0;
 static volatile uint32_t stat_invalid_pulses = 0;
+static volatile uint32_t stat_midgap_pulses = 0;  // Pulses classified by proximity (WiFi jitter)
 
 // Debug: last frame bit count
 static volatile uint32_t debug_last_frame_bits = 0;
@@ -257,6 +266,11 @@ static pulse_type_t classify_pulse(uint32_t duration_us)
         return PULSE_SHORT;
     } else if (duration_us >= LONG_PULSE_MIN && duration_us <= LONG_PULSE_MAX) {
         return PULSE_LONG;
+    } else if (duration_us > SHORT_PULSE_MAX && duration_us < LONG_PULSE_MIN) {
+        // Pulse in the gap between short and long - classify by proximity
+        // This handles WiFi-induced timing jitter
+        stat_midgap_pulses++;
+        return (duration_us < PULSE_MIDPOINT) ? PULSE_SHORT : PULSE_LONG;
     }
     return PULSE_INVALID;
 }
@@ -276,7 +290,9 @@ static pulse_type_t classify_pulse(uint32_t duration_us)
 static void IRAM_ATTR gpio_isr_handler(void *arg)
 {
     int64_t now = esp_timer_get_time();
-    int level = gpio_get_level(DL_BUS_GPIO);
+    // Use direct register read instead of gpio_get_level() - IRAM safe
+    // gpio_get_level() accesses flash and causes cache errors during NVS/WiFi init
+    int level = (GPIO.in >> DL_BUS_GPIO) & 1;
     int64_t prev = last_edge_time;
 
     last_edge_time = now;
@@ -299,14 +315,36 @@ static void IRAM_ATTR gpio_isr_handler(void *arg)
     }
 }
 
+// Interrupt handle for dedicated GPIO interrupt
+static intr_handle_t gpio_intr_handle = NULL;
+
+/**
+ * Dedicated GPIO ISR - handles the raw GPIO interrupt directly
+ * This bypasses the gpio_isr_service dispatcher for lower latency
+ */
+static void IRAM_ATTR gpio_dedicated_isr(void *arg)
+{
+    // Clear the interrupt status for our GPIO
+    if (DL_BUS_GPIO < 32) {
+        GPIO.status_w1tc = (1ULL << DL_BUS_GPIO);
+    } else {
+        GPIO.status1_w1tc.val = (1ULL << (DL_BUS_GPIO - 32));
+    }
+
+    // Call our handler
+    gpio_isr_handler(arg);
+}
+
 /**
  * Initialize GPIO interrupt for DL-Bus capture
+ * Uses dedicated interrupt (not shared ISR service) for lower latency
+ * ISR is pinned to Core 1 to avoid WiFi interference (WiFi runs on Core 0)
  */
 static esp_err_t init_gpio_capture(void)
 {
-    ESP_LOGI(TAG, "Initializing GPIO interrupt capture on GPIO%d", DL_BUS_GPIO);
+    ESP_LOGI(TAG, "Initializing GPIO interrupt capture on GPIO%d (Core 1)", DL_BUS_GPIO);
 
-    // Configure GPIO
+    // Configure GPIO for input with interrupt
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << DL_BUS_GPIO),
         .mode = GPIO_MODE_INPUT,
@@ -316,17 +354,27 @@ static esp_err_t init_gpio_capture(void)
     };
     ESP_ERROR_CHECK(gpio_config(&io_conf));
 
-    // Install GPIO ISR service with high priority
-    ESP_ERROR_CHECK(gpio_install_isr_service(ESP_INTR_FLAG_IRAM | ESP_INTR_FLAG_LEVEL3));
+    // Allocate dedicated interrupt on Core 1 with high priority
+    // ESP_INTR_FLAG_IRAM: ISR in IRAM for fast execution during flash operations
+    // ESP_INTR_FLAG_LEVEL3: High priority (level 4+ requires assembly handlers)
+    // Pinned to Core 1 via xTaskCreatePinnedToCore context (called from Core 1 task)
+    int intr_flags = ESP_INTR_FLAG_IRAM | ESP_INTR_FLAG_LEVEL3;
 
-    // Add handler for our GPIO
-    ESP_ERROR_CHECK(gpio_isr_handler_add(DL_BUS_GPIO, gpio_isr_handler, NULL));
+    esp_err_t ret = esp_intr_alloc(ETS_GPIO_INTR_SOURCE, intr_flags,
+                                   gpio_dedicated_isr, NULL, &gpio_intr_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to allocate GPIO interrupt: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Enable interrupt for our GPIO pin
+    ESP_ERROR_CHECK(gpio_intr_enable(DL_BUS_GPIO));
 
     // Initialize timing
     last_edge_time = 0;
-    last_level = gpio_get_level(DL_BUS_GPIO);
+    last_level = (GPIO.in >> DL_BUS_GPIO) & 1;
 
-    ESP_LOGI(TAG, "GPIO interrupt capture initialized");
+    ESP_LOGI(TAG, "GPIO dedicated interrupt capture initialized");
     return ESP_OK;
 }
 
@@ -438,6 +486,9 @@ typedef enum {
     DECODER_STATE_IN_BYTE,
 } decoder_state_t;
 
+// Maximum stop bit errors before abandoning frame
+#define MAX_STOP_BIT_ERRORS 8
+
 static void manchester_decoder_task(void *arg)
 {
     ESP_LOGI(TAG, "Manchester decoder task started");
@@ -451,6 +502,7 @@ static void manchester_decoder_task(void *arg)
     bool invert_data = false;   // If SYNC was zeros, invert subsequent data
     dlbus_frame_t frame;
     uint32_t total_bits_in_frame = 0;  // Debug: count all bits since SYNC
+    int stop_bit_errors = 0;    // Count of stop bit errors in current frame
 
     bit_entry_t bit;
 
@@ -497,6 +549,7 @@ static void manchester_decoder_task(void *arg)
                     current_byte = 0;
                     invert_data = false;
                     total_bits_in_frame = 0;
+                    stop_bit_errors = 0;
                     memset(&frame, 0, sizeof(frame));
                     consecutive_ones = 0;
                     consecutive_zeros = 0;
@@ -509,6 +562,7 @@ static void manchester_decoder_task(void *arg)
                     current_byte = 0;
                     invert_data = true;  // Invert all subsequent bits
                     total_bits_in_frame = 0;
+                    stop_bit_errors = 0;
                     memset(&frame, 0, sizeof(frame));
                     consecutive_ones = 0;
                     consecutive_zeros = 0;
@@ -553,8 +607,20 @@ static void manchester_decoder_task(void *arg)
                 } else {
                     // Stop bit (bit_index == 9) - should be 1
                     if (bit_val != 1) {
-                        ESP_LOGW(TAG, "Bad stop bit at byte %d (0x%02X)", byte_index, current_byte);
-                        // Continue anyway, might be noise
+                        stop_bit_errors++;
+                        if (stop_bit_errors <= 3) {
+                            // Only log first few errors to avoid log spam
+                            ESP_LOGW(TAG, "Bad stop bit at byte %d (0x%02X)", byte_index, current_byte);
+                        }
+                        // Check if too many errors - abandon frame
+                        if (stop_bit_errors >= MAX_STOP_BIT_ERRORS) {
+                            ESP_LOGW(TAG, "Too many stop bit errors (%d), abandoning frame at byte %d",
+                                     stop_bit_errors, byte_index);
+                            state = DECODER_STATE_HUNTING_SYNC;
+                            consecutive_ones = 0;
+                            consecutive_zeros = 0;
+                            break;
+                        }
                     }
 
                     // Byte complete
@@ -633,7 +699,8 @@ static const char* get_sensor_unit(uint8_t sensor_type)
  *
  * Encoding per type:
  * - Temperature (0x20): 12-bit signed value in low byte + bits 0-3 of high byte
- * - Room sensor (0x70): 8-bit value in low byte only (bits 0-3 of high byte = mode)
+ * - Room sensor (0x70): 9-bit signed value in low byte + bit 0 of high byte
+ *                       (bits 1-3 of high byte = operating mode)
  * - Flow (0x30): 12-bit unsigned value × 4 l/h
  * - Radiation (0x60): 12-bit unsigned value in W/m²
  */
@@ -662,12 +729,13 @@ static float decode_sensor_value(uint8_t low_byte, uint8_t high_byte, bool *vali
         }
 
         case SENSOR_TYPE_ROOM: {
-            // Room sensor: 8-bit value in low byte only
-            // Bits 0-3 of high byte contain operating mode, not temperature data
+            // Room sensor: 9-bit value (low byte + bit 0 of high byte)
+            // Bits 1-3 of high byte contain operating mode, not temperature data
             // Bit 7 of high byte is sign bit
-            int16_t raw_value = low_byte;
+            // Range: -51.1°C to +51.1°C (values -511 to +511)
+            int16_t raw_value = low_byte | ((high_byte & 0x01) << 8);
             if (high_byte & 0x80) {
-                raw_value = raw_value - 256;  // 8-bit two's complement
+                raw_value = raw_value - 512;  // 9-bit two's complement
             }
             return raw_value / 10.0f;
         }
@@ -882,6 +950,85 @@ static void print_frame(const dlbus_frame_t *frame)
 }
 
 // =============================================================================
+// MQTT Frame Processing
+// =============================================================================
+
+/**
+ * Process frame data for MQTT publishing
+ * Extracts all values and sends to MQTT subsystem
+ */
+static void process_frame_for_mqtt(const dlbus_frame_t *frame)
+{
+    // Only process valid frames
+    if (!frame->valid) {
+        return;
+    }
+
+    // ==========================================================================
+    // Process Sensor Values (add samples for median calculation)
+    // ==========================================================================
+    for (int i = 0; i < NUM_SENSORS; i++) {
+        // Skip unused sensors
+        if (strcmp(sensor_names[i], "---") == 0) {
+            continue;
+        }
+
+        int byte_offset = FRAME_OFF_SENSORS + (i * 2);
+        uint8_t low_byte = frame->data[byte_offset];
+        uint8_t high_byte = frame->data[byte_offset + 1];
+
+        bool valid;
+        float value = decode_sensor_value(low_byte, high_byte, &valid);
+
+        if (valid) {
+            mqtt_ha_add_sensor_sample(i, value);
+        }
+    }
+
+    // ==========================================================================
+    // Process Output States (publish immediately on change)
+    // ==========================================================================
+    for (int i = 0; i < NUM_OUTPUTS; i++) {
+        bool is_on = is_output_on(frame->data, i + 1);
+        mqtt_ha_update_output(i, is_on);
+    }
+
+    // ==========================================================================
+    // Process Speed Levels (publish immediately on change)
+    // ==========================================================================
+    static const int speed_offsets[NUM_SPEED_LEVELS] = {
+        FRAME_OFF_SPEED_A1, FRAME_OFF_SPEED_A2, FRAME_OFF_SPEED_A6, FRAME_OFF_SPEED_A7
+    };
+
+    for (int i = 0; i < NUM_SPEED_LEVELS; i++) {
+        bool active;
+        int speed = decode_speed_level(frame->data[speed_offsets[i]], &active);
+        mqtt_ha_update_speed(i, speed, active);
+    }
+
+    // ==========================================================================
+    // Process Heat Meters
+    // ==========================================================================
+    uint8_t heat_reg = frame->data[FRAME_OFF_HEAT_REG];
+
+    // Heat meter 1
+    bool heat1_active = (heat_reg & 0x01) != 0;
+    if (heat1_active) {
+        float power1 = decode_heat_power(&frame->data[FRAME_OFF_HEAT1]);
+        float energy1 = decode_heat_energy(&frame->data[FRAME_OFF_HEAT1]);
+        mqtt_ha_publish_heat_meter(0, power1, energy1, true);
+    }
+
+    // Heat meter 2
+    bool heat2_active = (heat_reg & 0x02) != 0;
+    if (heat2_active) {
+        float power2 = decode_heat_power(&frame->data[FRAME_OFF_HEAT2]);
+        float energy2 = decode_heat_energy(&frame->data[FRAME_OFF_HEAT2]);
+        mqtt_ha_publish_heat_meter(1, power2, energy2, true);
+    }
+}
+
+// =============================================================================
 // GPIO Debug Functions
 // =============================================================================
 
@@ -952,6 +1099,32 @@ static void init_gpio_for_debug(void)
 
 
 // =============================================================================
+// Core 1 Initialization Task
+// =============================================================================
+
+// Semaphore to signal Core 1 init completion
+static SemaphoreHandle_t core1_init_done = NULL;
+static esp_err_t core1_init_result = ESP_OK;
+
+/**
+ * Task that runs on Core 1 to initialize the GPIO interrupt
+ * This ensures the interrupt is allocated on Core 1, away from WiFi (Core 0)
+ */
+static void core1_init_task(void *arg)
+{
+    ESP_LOGI(TAG, "Core 1 init task started on core %d", xPortGetCoreID());
+
+    // Initialize GPIO interrupt capture on Core 1
+    core1_init_result = init_gpio_capture();
+
+    // Signal completion
+    xSemaphoreGive(core1_init_done);
+
+    // Delete this task
+    vTaskDelete(NULL);
+}
+
+// =============================================================================
 // Main Application
 // =============================================================================
 
@@ -959,12 +1132,16 @@ void app_main(void)
 {
     printf("\n\n");
     printf("================================================\n");
-    printf("  UVR1611 DL-Bus Reader - GPIO Interrupt Capture\n");
+    printf("  UVR1611 DL-Bus Reader - MQTT Gateway\n");
     printf("================================================\n");
     printf("GPIO:         %d\n", DL_BUS_GPIO);
     printf("Bit duration: %d us (488 Hz clock)\n", BIT_DURATION_US);
     printf("Frame size:   %d bytes\n", FRAME_BYTES);
     printf("================================================\n\n");
+
+    // ==========================================================================
+    // Initialize DL-Bus Capture FIRST (before WiFi to avoid timing interference)
+    // ==========================================================================
 
     // Check signal activity before setting up interrupts
     init_gpio_for_debug();
@@ -990,39 +1167,122 @@ void app_main(void)
         return;
     }
 
-    // Initialize GPIO interrupt capture (replaces RMT)
-    ESP_ERROR_CHECK(init_gpio_capture());
+    // Initialize GPIO interrupt on Core 1 (away from WiFi on Core 0)
+    // This requires running init code on Core 1 since esp_intr_alloc pins to current core
+    core1_init_done = xSemaphoreCreateBinary();
+    xTaskCreatePinnedToCore(core1_init_task, "core1_init", 2048, NULL,
+                            configMAX_PRIORITIES - 1, NULL, 1);
+    xSemaphoreTake(core1_init_done, portMAX_DELAY);
+    vSemaphoreDelete(core1_init_done);
+    ESP_ERROR_CHECK(core1_init_result);
 
-    // Create tasks
-    ESP_LOGI(TAG, "Starting pipeline tasks...");
+    // Create DL-Bus tasks PINNED TO CORE 1 (WiFi runs on Core 0)
+    // This prevents WiFi interrupts from interfering with timing-critical DL-Bus decoding
+    ESP_LOGI(TAG, "Starting pipeline tasks on Core 1...");
 
-    // Bit extractor task
-    xTaskCreate(bit_extractor_task, "bit_extract", 4096, NULL, 8, &bit_extractor_task_handle);
+    // Bit extractor task - high priority, pinned to Core 1
+    xTaskCreatePinnedToCore(bit_extractor_task, "bit_extract", 4096, NULL,
+                            configMAX_PRIORITIES - 2, &bit_extractor_task_handle, 1);
 
-    // Manchester decoder task
-    xTaskCreate(manchester_decoder_task, "manchester", 4096, NULL, 6, &manchester_decoder_task_handle);
+    // Manchester decoder task - medium-high priority, pinned to Core 1
+    xTaskCreatePinnedToCore(manchester_decoder_task, "manchester", 4096, NULL,
+                            configMAX_PRIORITIES - 3, &manchester_decoder_task_handle, 1);
 
-    ESP_LOGI(TAG, "Pipeline started with GPIO interrupt capture!");
+    ESP_LOGI(TAG, "DL-Bus pipeline started on Core 1!");
+
+    // Wait for DL-Bus pipeline to stabilize before starting WiFi
+    // WiFi initialization causes significant interrupt activity
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    ESP_LOGI(TAG, "DL-Bus pipeline stabilized");
+
+    // ==========================================================================
+    // Initialize Configuration Store (NVS)
+    // ==========================================================================
+    ESP_LOGI(TAG, "Initializing configuration store...");
+    if (config_store_init() != ESP_OK) {
+        ESP_LOGE(TAG, "Config store initialization failed!");
+        // Continue - DL-Bus reading will still work but no MQTT
+    }
+
+    // ==========================================================================
+    // Initialize WiFi Manager (handles STA/AP mode switching)
+    // ==========================================================================
+    ESP_LOGI(TAG, "Initializing WiFi Manager...");
+    if (wifi_manager_init() != ESP_OK) {
+        ESP_LOGE(TAG, "WiFi Manager initialization failed!");
+    } else {
+        ESP_LOGI(TAG, "Starting WiFi (STA mode or AP fallback)...");
+        wifi_manager_start();  // Connects to WiFi or starts AP mode
+
+        char ip[16], mac[18];
+        wifi_manager_get_ip(ip, sizeof(ip));
+        wifi_manager_get_mac(mac, sizeof(mac));
+
+        if (wifi_manager_is_ap_mode()) {
+            char ap_ssid[32];
+            wifi_manager_get_ap_ssid(ap_ssid, sizeof(ap_ssid));
+            ESP_LOGW(TAG, "Started in AP mode: SSID=%s, IP=%s", ap_ssid, ip);
+        } else {
+            ESP_LOGI(TAG, "WiFi connected: IP=%s, MAC=%s", ip, mac);
+        }
+    }
+
+    // ==========================================================================
+    // Start Web Server (works in both STA and AP modes)
+    // ==========================================================================
+    ESP_LOGI(TAG, "Starting web server...");
+    if (webserver_start() != ESP_OK) {
+        ESP_LOGE(TAG, "Web server start failed!");
+    } else {
+        ESP_LOGI(TAG, "Web server started on port 80");
+    }
+
+    // ==========================================================================
+    // Initialize MQTT (only if WiFi connected in STA mode)
+    // ==========================================================================
+    if (wifi_manager_is_connected()) {
+        ESP_LOGI(TAG, "Initializing MQTT...");
+        if (mqtt_ha_init() != ESP_OK) {
+            ESP_LOGE(TAG, "MQTT initialization failed!");
+        } else {
+            ESP_LOGI(TAG, "Starting MQTT client...");
+            if (mqtt_ha_start() != ESP_OK) {
+                ESP_LOGW(TAG, "MQTT start failed - continuing without MQTT");
+            } else {
+                ESP_LOGI(TAG, "MQTT client started");
+            }
+        }
+    } else {
+        ESP_LOGW(TAG, "WiFi not connected - MQTT disabled");
+    }
+
     printf("\n--- Waiting for frames ---\n\n");
 
-    // Main loop - process decoded frames and print statistics
+    // Main loop - process decoded frames, MQTT, and print statistics
     dlbus_frame_t frame;
     TickType_t last_stats_time = xTaskGetTickCount();
 
     while (1) {
         // Check for decoded frames
-        if (xQueueReceive(frame_queue, &frame, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        if (xQueueReceive(frame_queue, &frame, pdMS_TO_TICKS(100)) == pdTRUE) {
+            // Print frame to serial
             print_frame(&frame);
+
+            // Process frame for MQTT publishing
+            process_frame_for_mqtt(&frame);
         }
+
+        // Run MQTT loop (handles publish intervals)
+        mqtt_ha_loop();
 
         // Print statistics every 10 seconds
         TickType_t now = xTaskGetTickCount();
         if ((now - last_stats_time) >= pdMS_TO_TICKS(10000)) {
             printf("\n--- Pipeline Statistics (GPIO Interrupt) ---\n");
             printf("  Edges captured:  %lu\n", (unsigned long)stat_edges_received);
-            printf("  Pulses: short=%lu, long=%lu, invalid=%lu\n",
+            printf("  Pulses: short=%lu, long=%lu, midgap=%lu, invalid=%lu\n",
                    (unsigned long)stat_short_pulses, (unsigned long)stat_long_pulses,
-                   (unsigned long)stat_invalid_pulses);
+                   (unsigned long)stat_midgap_pulses, (unsigned long)stat_invalid_pulses);
             printf("  Gaps detected:   %lu\n", (unsigned long)stat_gaps_detected);
             printf("  Bits extracted:  %lu\n", (unsigned long)stat_bits_extracted);
             printf("  Last frame bits: %lu (need %d)\n", (unsigned long)debug_last_frame_bits, FRAME_BYTES * 10);
@@ -1031,6 +1291,9 @@ void app_main(void)
             printf("  Frames valid:    %lu\n", (unsigned long)stat_frames_valid);
             printf("  Edge buffer:     %lu/%d\n", (unsigned long)edge_buffer_count(&edge_buffer), EDGE_BUFFER_SIZE);
             printf("  Bit queue:       %lu/%d\n", (unsigned long)uxQueueMessagesWaiting(bit_queue), BIT_QUEUE_SIZE);
+            printf("  WiFi mode:       %s\n", wifi_manager_is_ap_mode() ? "AP" : "STA");
+            printf("  MQTT connected:  %s\n", mqtt_ha_is_connected() ? "Yes" : "No");
+            printf("  Webserver:       %s\n", webserver_is_running() ? "Running" : "Stopped");
             printf("--------------------------------------------\n\n");
             last_stats_time = now;
         }
