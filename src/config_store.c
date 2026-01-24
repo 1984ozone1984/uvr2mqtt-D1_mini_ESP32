@@ -23,6 +23,7 @@
 #include "sdkconfig.h"
 
 #include "config_store.h"
+#include "io_config.h"
 
 static const char *TAG = "CONFIG";
 
@@ -57,6 +58,10 @@ static const char *TAG = "CONFIG";
 #define KEY_MQTT_USERNAME       "mqtt_user"
 #define KEY_MQTT_PASSWORD       "mqtt_pass"
 
+// I/O name key prefixes (sensor_0 through sensor_15, output_0 through output_12)
+#define KEY_SENSOR_PREFIX       "sensor_"
+#define KEY_OUTPUT_PREFIX       "output_"
+
 // =============================================================================
 // Runtime Configuration Storage
 // =============================================================================
@@ -68,6 +73,8 @@ typedef struct {
     char mqtt_client_id[CONFIG_MQTT_CLIENT_ID_MAX_LEN];
     char mqtt_base_topic[CONFIG_MQTT_TOPIC_MAX_LEN];
     char ha_discovery_prefix[CONFIG_MQTT_TOPIC_MAX_LEN];
+    char sensor_names[CONFIG_NUM_SENSORS][CONFIG_IO_NAME_MAX_LEN];
+    char output_names[CONFIG_NUM_OUTPUTS][CONFIG_IO_NAME_MAX_LEN];
     uint16_t interval_sensors;
     uint16_t interval_outputs;
     uint16_t interval_system;
@@ -235,6 +242,20 @@ static void load_kconfig_defaults(void)
     s_config.interval_system = CONFIG_UVR_PUBLISH_INTERVAL_SYSTEM;
     s_config.interval_discovery = CONFIG_UVR_HA_DISCOVERY_INTERVAL;
 
+    // I/O names from Kconfig
+    const char *kconfig_sensor_names[] = SENSOR_NAMES;
+    const char *kconfig_output_names[] = OUTPUT_NAMES;
+
+    for (int i = 0; i < CONFIG_NUM_SENSORS; i++) {
+        strncpy(s_config.sensor_names[i], kconfig_sensor_names[i], CONFIG_IO_NAME_MAX_LEN - 1);
+        s_config.sensor_names[i][CONFIG_IO_NAME_MAX_LEN - 1] = '\0';
+    }
+
+    for (int i = 0; i < CONFIG_NUM_OUTPUTS; i++) {
+        strncpy(s_config.output_names[i], kconfig_output_names[i], CONFIG_IO_NAME_MAX_LEN - 1);
+        s_config.output_names[i][CONFIG_IO_NAME_MAX_LEN - 1] = '\0';
+    }
+
     s_config.version = CONFIG_VERSION;
 }
 
@@ -277,6 +298,17 @@ static void load_nvs_overrides(void)
     s_config.mqtt_qos = load_u8(handle, KEY_MQTT_QOS, s_config.mqtt_qos);
     s_config.mqtt_retain_sensors = load_u8(handle, KEY_MQTT_RETAIN_SENS, s_config.mqtt_retain_sensors);
     s_config.mqtt_retain_status = load_u8(handle, KEY_MQTT_RETAIN_STAT, s_config.mqtt_retain_status);
+
+    // Load I/O names from NVS (if stored)
+    char key[16];
+    for (int i = 0; i < CONFIG_NUM_SENSORS; i++) {
+        snprintf(key, sizeof(key), "%s%d", KEY_SENSOR_PREFIX, i);
+        load_string(handle, key, s_config.sensor_names[i], CONFIG_IO_NAME_MAX_LEN, s_config.sensor_names[i]);
+    }
+    for (int i = 0; i < CONFIG_NUM_OUTPUTS; i++) {
+        snprintf(key, sizeof(key), "%s%d", KEY_OUTPUT_PREFIX, i);
+        load_string(handle, key, s_config.output_names[i], CONFIG_IO_NAME_MAX_LEN, s_config.output_names[i]);
+    }
 
     nvs_close(handle);
     ESP_LOGI(TAG, "Loaded NVS config overrides");
@@ -721,6 +753,113 @@ esp_err_t config_set_dlbus_gpio(uint8_t gpio)
         ESP_LOGI(TAG, "DL-Bus GPIO updated: %d", gpio);
     }
     return err;
+}
+
+// =============================================================================
+// Public API - I/O Names
+// =============================================================================
+
+const char *config_get_sensor_name(int index)
+{
+    if (index < 0 || index >= CONFIG_NUM_SENSORS) {
+        return "---";
+    }
+    return s_config.sensor_names[index];
+}
+
+esp_err_t config_set_sensor_name(int index, const char *name)
+{
+    if (index < 0 || index >= CONFIG_NUM_SENSORS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (name == NULL || strlen(name) >= CONFIG_IO_NAME_MAX_LEN) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    lock();
+    strncpy(s_config.sensor_names[index], name, CONFIG_IO_NAME_MAX_LEN - 1);
+    s_config.sensor_names[index][CONFIG_IO_NAME_MAX_LEN - 1] = '\0';
+    unlock();
+
+    // Save to NVS
+    char key[16];
+    snprintf(key, sizeof(key), "%s%d", KEY_SENSOR_PREFIX, index);
+    esp_err_t err = save_string(key, name);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Sensor S%d name updated: %s", index + 1, name);
+    }
+    return err;
+}
+
+const char *config_get_output_name(int index)
+{
+    if (index < 0 || index >= CONFIG_NUM_OUTPUTS) {
+        return "---";
+    }
+    return s_config.output_names[index];
+}
+
+esp_err_t config_set_output_name(int index, const char *name)
+{
+    if (index < 0 || index >= CONFIG_NUM_OUTPUTS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (name == NULL || strlen(name) >= CONFIG_IO_NAME_MAX_LEN) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    lock();
+    strncpy(s_config.output_names[index], name, CONFIG_IO_NAME_MAX_LEN - 1);
+    s_config.output_names[index][CONFIG_IO_NAME_MAX_LEN - 1] = '\0';
+    unlock();
+
+    // Save to NVS
+    char key[16];
+    snprintf(key, sizeof(key), "%s%d", KEY_OUTPUT_PREFIX, index);
+    esp_err_t err = save_string(key, name);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Output A%d name updated: %s", index + 1, name);
+    }
+    return err;
+}
+
+esp_err_t config_reset_io_names(void)
+{
+    // Reload Kconfig defaults for I/O names
+    const char *kconfig_sensor_names[] = SENSOR_NAMES;
+    const char *kconfig_output_names[] = OUTPUT_NAMES;
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE_CONFIG, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    char key[16];
+
+    lock();
+    for (int i = 0; i < CONFIG_NUM_SENSORS; i++) {
+        strncpy(s_config.sensor_names[i], kconfig_sensor_names[i], CONFIG_IO_NAME_MAX_LEN - 1);
+        s_config.sensor_names[i][CONFIG_IO_NAME_MAX_LEN - 1] = '\0';
+        // Erase from NVS to use defaults
+        snprintf(key, sizeof(key), "%s%d", KEY_SENSOR_PREFIX, i);
+        nvs_erase_key(handle, key);
+    }
+
+    for (int i = 0; i < CONFIG_NUM_OUTPUTS; i++) {
+        strncpy(s_config.output_names[i], kconfig_output_names[i], CONFIG_IO_NAME_MAX_LEN - 1);
+        s_config.output_names[i][CONFIG_IO_NAME_MAX_LEN - 1] = '\0';
+        // Erase from NVS to use defaults
+        snprintf(key, sizeof(key), "%s%d", KEY_OUTPUT_PREFIX, i);
+        nvs_erase_key(handle, key);
+    }
+    unlock();
+
+    nvs_commit(handle);
+    nvs_close(handle);
+
+    ESP_LOGI(TAG, "I/O names reset to Kconfig defaults");
+    return ESP_OK;
 }
 
 // =============================================================================

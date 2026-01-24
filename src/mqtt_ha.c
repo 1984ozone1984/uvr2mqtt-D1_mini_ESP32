@@ -50,9 +50,7 @@ typedef struct {
 } heat_meter_buffer_t;
 static heat_meter_buffer_t heat_meter_buffers[NUM_HEAT_METERS] = {0};
 
-// Configuration from io_config.h
-static const char *sensor_names[] = SENSOR_NAMES;
-static const char *output_names[] = OUTPUT_NAMES;
+// Speed level names from Kconfig (not editable via web)
 static const char *speed_level_names[] = SPEED_LEVEL_NAMES;
 
 // Timing
@@ -323,7 +321,7 @@ void mqtt_ha_publish_sensors(void)
 
     for (int i = 0; i < NUM_SENSORS; i++) {
         // Skip unused sensors
-        if (strcmp(sensor_names[i], "---") == 0) {
+        if (strcmp(config_get_sensor_name(i), "---") == 0) {
             continue;
         }
 
@@ -335,7 +333,7 @@ void mqtt_ha_publish_sensors(void)
         float median = calculate_median(buffer);
 
         // Create topic
-        sanitize_for_topic(sensor_names[i], sanitized_name, sizeof(sanitized_name));
+        sanitize_for_topic(config_get_sensor_name(i), sanitized_name, sizeof(sanitized_name));
         snprintf(topic, sizeof(topic), "%s/sensor/%s/state", base_topic, sanitized_name);
 
         // Create payload
@@ -372,14 +370,14 @@ void mqtt_ha_update_output(int output_index, bool is_on)
         char topic[MQTT_TOPIC_MAX_LEN];
         char sanitized_name[32];
 
-        sanitize_for_topic(output_names[output_index], sanitized_name, sizeof(sanitized_name));
+        sanitize_for_topic(config_get_output_name(output_index), sanitized_name, sizeof(sanitized_name));
         snprintf(topic, sizeof(topic), "%s/switch/%s/state",
                  config_get_mqtt_base_topic(), sanitized_name);
 
         esp_mqtt_client_publish(mqtt_client, topic, is_on ? "ON" : "OFF", 0,
                                 config_get_mqtt_qos(), config_get_mqtt_retain_sensors());
 
-        ESP_LOGI(TAG, "Output %s changed to %s", output_names[output_index], is_on ? "ON" : "OFF");
+        ESP_LOGI(TAG, "Output %s changed to %s", config_get_output_name(output_index), is_on ? "ON" : "OFF");
     }
 
     output_tracker.initialized = true;
@@ -398,7 +396,7 @@ void mqtt_ha_publish_outputs(void)
     bool retain = config_get_mqtt_retain_sensors();
 
     for (int i = 0; i < NUM_OUTPUTS; i++) {
-        sanitize_for_topic(output_names[i], sanitized_name, sizeof(sanitized_name));
+        sanitize_for_topic(config_get_output_name(i), sanitized_name, sizeof(sanitized_name));
         snprintf(topic, sizeof(topic), "%s/switch/%s/state", base_topic, sanitized_name);
 
         esp_mqtt_client_publish(mqtt_client, topic,
@@ -713,11 +711,11 @@ void mqtt_ha_publish_discovery(void)
     // Temperature Sensors
     // ==========================================================================
     for (int i = 0; i < NUM_SENSORS; i++) {
-        if (strcmp(sensor_names[i], "---") == 0) {
+        if (strcmp(config_get_sensor_name(i), "---") == 0) {
             continue;
         }
 
-        sanitize_for_topic(sensor_names[i], sanitized_name, sizeof(sanitized_name));
+        sanitize_for_topic(config_get_sensor_name(i), sanitized_name, sizeof(sanitized_name));
         snprintf(state_topic, sizeof(state_topic), "%s/sensor/%s/state",
                  base_topic, sanitized_name);
 
@@ -725,12 +723,12 @@ void mqtt_ha_publish_discovery(void)
         const char *device_class = "temperature";
         const char *unit = "°C";
 
-        if (strstr(sensor_names[i], "Durchfl") != NULL) {
+        if (strstr(config_get_sensor_name(i), "Durchfl") != NULL) {
             device_class = "";  // No device class for flow
             unit = "l/h";
         }
 
-        publish_ha_sensor_discovery(sensor_names[i], device_class, unit,
+        publish_ha_sensor_discovery(config_get_sensor_name(i), device_class, unit,
                                     state_topic, sanitized_name, device_id);
     }
 
@@ -738,18 +736,18 @@ void mqtt_ha_publish_discovery(void)
     // Output Binary Sensors (Pumps, Valves, etc.)
     // ==========================================================================
     for (int i = 0; i < NUM_OUTPUTS; i++) {
-        sanitize_for_topic(output_names[i], sanitized_name, sizeof(sanitized_name));
+        sanitize_for_topic(config_get_output_name(i), sanitized_name, sizeof(sanitized_name));
         snprintf(state_topic, sizeof(state_topic), "%s/switch/%s/state",
                  base_topic, sanitized_name);
 
         // Determine device class based on output name
         const char *device_class = "running";  // Default for pumps
-        if (strstr(output_names[i], "Ventil") != NULL ||
-            strstr(output_names[i], "Misch") != NULL) {
+        if (strstr(config_get_output_name(i), "Ventil") != NULL ||
+            strstr(config_get_output_name(i), "Misch") != NULL) {
             device_class = "opening";
         }
 
-        publish_ha_binary_sensor_discovery(output_names[i], device_class,
+        publish_ha_binary_sensor_discovery(config_get_output_name(i), device_class,
                                            state_topic, sanitized_name, device_id);
     }
 

@@ -23,10 +23,6 @@ static const char *TAG = "WEBSERVER";
 
 static httpd_handle_t server = NULL;
 
-// Configuration from io_config.h
-static const char *sensor_names[] = SENSOR_NAMES;
-static const char *output_names[] = OUTPUT_NAMES;
-
 // =============================================================================
 // HTML Templates
 // =============================================================================
@@ -188,14 +184,14 @@ static esp_err_t root_handler(httpd_req_t *req)
     p += n; remaining -= n;
 
     for (int i = 0; i < NUM_SENSORS; i++) {
-        if (strcmp(sensor_names[i], "---") == 0) {
+        if (strcmp(config_get_sensor_name(i), "---") == 0) {
             continue;
         }
 
         n = snprintf(p, remaining,
             "<div class=\"item\"><div class=\"item-name\">S%d %s</div>"
             "<div class=\"item-value\">%s</div></div>",
-            i + 1, sensor_names[i],
+            i + 1, config_get_sensor_name(i),
             sensor_valid[i] ? "" : "---");
 
         if (sensor_valid[i]) {
@@ -205,7 +201,7 @@ static esp_err_t root_handler(httpd_req_t *req)
             n = snprintf(p, remaining,
                 "<div class=\"item\"><div class=\"item-name\">S%d %s</div>"
                 "<div class=\"item-value\">%.1f</div></div>",
-                i + 1, sensor_names[i], sensor_values[i]);
+                i + 1, config_get_sensor_name(i), sensor_values[i]);
         }
         p += n; remaining -= n;
     }
@@ -224,7 +220,7 @@ static esp_err_t root_handler(httpd_req_t *req)
         n = snprintf(p, remaining,
             "<div class=\"item\"><div class=\"item-name\">A%d %s</div>"
             "<div class=\"item-value %s\">%s</div></div>",
-            i + 1, output_names[i],
+            i + 1, config_get_output_name(i),
             output_states[i] ? "on" : "off",
             output_states[i] ? "ON" : "OFF");
         p += n; remaining -= n;
@@ -249,14 +245,16 @@ static esp_err_t root_handler(httpd_req_t *req)
 
 static esp_err_t config_handler(httpd_req_t *req)
 {
-    char *response = malloc(8192);
+    // Large buffer for I/O names form (29 fields)
+    const size_t buf_size = 16384;
+    char *response = malloc(buf_size);
     if (!response) {
         httpd_resp_send_500(req);
         return ESP_FAIL;
     }
 
     char *p = response;
-    size_t remaining = 8192;
+    size_t remaining = buf_size;
     int n;
 
     // Header
@@ -311,6 +309,48 @@ static esp_err_t config_handler(httpd_req_t *req)
         "</div>",
         config_get_mqtt_broker_uri(),
         config_get_mqtt_base_topic());
+    p += n; remaining -= n;
+
+    // I/O Names Card - Sensor Names
+    n = snprintf(p, remaining,
+        "<div class=\"card\">"
+        "<h2>Sensor Names (S1-S16)</h2>"
+        "<form method=\"POST\" action=\"/config/io\">"
+        "<p class=\"info\">Use '---' to disable a sensor. Changes affect web display immediately, reboot for MQTT.</p>"
+        "<div class=\"grid\">");
+    p += n; remaining -= n;
+
+    for (int i = 0; i < CONFIG_NUM_SENSORS; i++) {
+        n = snprintf(p, remaining,
+            "<div class=\"item\">"
+            "<label>S%d</label>"
+            "<input type=\"text\" name=\"sensor_%d\" value=\"%s\" maxlength=\"23\">"
+            "</div>",
+            i + 1, i, config_get_sensor_name(i));
+        p += n; remaining -= n;
+    }
+
+    n = snprintf(p, remaining,
+        "</div>"
+        "<h2 style=\"margin-top:20px;\">Output Names (A1-A13)</h2>"
+        "<div class=\"grid\">");
+    p += n; remaining -= n;
+
+    for (int i = 0; i < CONFIG_NUM_OUTPUTS; i++) {
+        n = snprintf(p, remaining,
+            "<div class=\"item\">"
+            "<label>A%d</label>"
+            "<input type=\"text\" name=\"output_%d\" value=\"%s\" maxlength=\"23\">"
+            "</div>",
+            i + 1, i, config_get_output_name(i));
+        p += n; remaining -= n;
+    }
+
+    n = snprintf(p, remaining,
+        "</div>"
+        "<button type=\"submit\">Save I/O Names</button>"
+        "</form>"
+        "</div>");
     p += n; remaining -= n;
 
     // Reboot Card
@@ -471,6 +511,48 @@ static esp_err_t config_mqtt_handler(httpd_req_t *req)
         "MQTT settings saved. Reboot to apply changes.", true);
 }
 
+static esp_err_t config_io_handler(httpd_req_t *req)
+{
+    // Large buffer needed for 29 I/O fields
+    char *body = malloc(2048);
+    if (!body) {
+        return config_response_page(req, "I/O Configuration", "Memory allocation failed", false);
+    }
+
+    int ret = httpd_req_recv(req, body, 2047);
+    if (ret <= 0) {
+        free(body);
+        return config_response_page(req, "I/O Configuration", "Failed to receive form data", false);
+    }
+    body[ret] = '\0';
+
+    char name[CONFIG_IO_NAME_MAX_LEN];
+    char key[16];
+
+    // Process sensor names (S1-S16)
+    for (int i = 0; i < CONFIG_NUM_SENSORS; i++) {
+        snprintf(key, sizeof(key), "sensor_%d", i);
+        if (get_form_value(body, key, name, sizeof(name)) && strlen(name) > 0) {
+            config_set_sensor_name(i, name);
+        }
+    }
+
+    // Process output names (A1-A13)
+    for (int i = 0; i < CONFIG_NUM_OUTPUTS; i++) {
+        snprintf(key, sizeof(key), "output_%d", i);
+        if (get_form_value(body, key, name, sizeof(name)) && strlen(name) > 0) {
+            config_set_output_name(i, name);
+        }
+    }
+
+    free(body);
+
+    ESP_LOGI(TAG, "I/O names saved");
+    return config_response_page(req, "I/O Configuration",
+        "I/O names saved. Changes take effect immediately for the web interface. "
+        "Reboot to update MQTT topics and Home Assistant.", true);
+}
+
 static esp_err_t reboot_handler(httpd_req_t *req)
 {
     char response[2560];
@@ -529,8 +611,8 @@ static esp_err_t api_status_handler(httpd_req_t *req)
 
     cJSON *sensors = cJSON_AddObjectToObject(root, "sensors");
     for (int i = 0; i < NUM_SENSORS; i++) {
-        if (strcmp(sensor_names[i], "---") != 0 && sensor_valid[i]) {
-            cJSON_AddNumberToObject(sensors, sensor_names[i], sensor_values[i]);
+        if (strcmp(config_get_sensor_name(i), "---") != 0 && sensor_valid[i]) {
+            cJSON_AddNumberToObject(sensors, config_get_sensor_name(i), sensor_values[i]);
         }
     }
 
@@ -540,7 +622,7 @@ static esp_err_t api_status_handler(httpd_req_t *req)
 
     cJSON *outputs = cJSON_AddObjectToObject(root, "outputs");
     for (int i = 0; i < NUM_OUTPUTS; i++) {
-        cJSON_AddBoolToObject(outputs, output_names[i], output_states[i]);
+        cJSON_AddBoolToObject(outputs, config_get_output_name(i), output_states[i]);
     }
 
     char *json = cJSON_PrintUnformatted(root);
@@ -616,6 +698,13 @@ esp_err_t webserver_start(void)
         .handler = config_mqtt_handler,
     };
     httpd_register_uri_handler(server, &config_mqtt_uri);
+
+    httpd_uri_t config_io_uri = {
+        .uri = "/config/io",
+        .method = HTTP_POST,
+        .handler = config_io_handler,
+    };
+    httpd_register_uri_handler(server, &config_io_uri);
 
     httpd_uri_t reboot_uri = {
         .uri = "/reboot",

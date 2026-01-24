@@ -35,6 +35,11 @@ extern "C" {
 #define CONFIG_MQTT_PASSWORD_MAX_LEN    64
 #define CONFIG_MQTT_CLIENT_ID_MAX_LEN   32
 #define CONFIG_MQTT_TOPIC_MAX_LEN       64
+#define CONFIG_IO_NAME_MAX_LEN          24   // Max length for sensor/output names
+
+// Number of I/O channels
+#define CONFIG_NUM_SENSORS              16
+#define CONFIG_NUM_OUTPUTS              13
 
 // Current configuration version (increment on schema changes)
 #define CONFIG_VERSION                  1
@@ -334,6 +339,46 @@ esp_err_t config_set_mqtt_credentials(const char *username, const char *password
  * @return ESP_OK on success
  */
 esp_err_t config_clear_mqtt_credentials(void);
+
+// =============================================================================
+// I/O Names (Kconfig defaults with NVS override)
+// =============================================================================
+
+/**
+ * Get sensor name
+ * @param index Sensor index (0-15 for S1-S16)
+ * @return Sensor name string (valid until next set or reboot)
+ */
+const char *config_get_sensor_name(int index);
+
+/**
+ * Set sensor name
+ * @param index Sensor index (0-15 for S1-S16)
+ * @param name New sensor name (max CONFIG_IO_NAME_MAX_LEN-1 chars)
+ * @return ESP_OK on success
+ */
+esp_err_t config_set_sensor_name(int index, const char *name);
+
+/**
+ * Get output name
+ * @param index Output index (0-12 for A1-A13)
+ * @return Output name string (valid until next set or reboot)
+ */
+const char *config_get_output_name(int index);
+
+/**
+ * Set output name
+ * @param index Output index (0-12 for A1-A13)
+ * @param name New output name (max CONFIG_IO_NAME_MAX_LEN-1 chars)
+ * @return ESP_OK on success
+ */
+esp_err_t config_set_output_name(int index, const char *name);
+
+/**
+ * Reset all I/O names to Kconfig defaults
+ * @return ESP_OK on success
+ */
+esp_err_t config_reset_io_names(void);
 
 // =============================================================================
 // Factory Reset

@@ -41,10 +41,8 @@
 static const char *TAG = "DL-BUS";
 
 // =============================================================================
-// I/O Configuration Arrays (from Kconfig)
+// I/O Configuration Arrays (from Kconfig, speed/units not editable via web)
 // =============================================================================
-static const char *sensor_names[NUM_SENSORS] = SENSOR_NAMES;
-static const char *output_names[NUM_OUTPUTS] = OUTPUT_NAMES;
 static const char *speed_level_names[NUM_SPEED_LEVELS] = SPEED_LEVEL_NAMES;
 static const char *sensor_units[NUM_SENSOR_TYPES] = SENSOR_UNITS;
 
@@ -850,11 +848,11 @@ static void print_frame(const dlbus_frame_t *frame)
         const char *unit = get_sensor_unit(sensor_type);
 
         // Skip unused sensors (marked with "---")
-        if (strcmp(sensor_names[i], "---") == 0) {
+        if (strcmp(config_get_sensor_name(i), "---") == 0) {
             continue;
         }
 
-        printf("  S%-2d %-16s: ", i + 1, sensor_names[i]);
+        printf("  S%-2d %-16s: ", i + 1, config_get_sensor_name(i));
 
         if (!valid || sensor_type == SENSOR_TYPE_UNUSED) {
             printf("(unused)\n");
@@ -879,7 +877,7 @@ static void print_frame(const dlbus_frame_t *frame)
 
     for (int i = 0; i < NUM_OUTPUTS; i++) {
         bool is_on = is_output_on(frame->data, i + 1);
-        printf("  A%-2d %-16s: %s\n", i + 1, output_names[i], is_on ? "EIN" : "AUS");
+        printf("  A%-2d %-16s: %s\n", i + 1, config_get_output_name(i), is_on ? "EIN" : "AUS");
     }
 
     // ==========================================================================
@@ -969,7 +967,7 @@ static void process_frame_for_mqtt(const dlbus_frame_t *frame)
     // ==========================================================================
     for (int i = 0; i < NUM_SENSORS; i++) {
         // Skip unused sensors
-        if (strcmp(sensor_names[i], "---") == 0) {
+        if (strcmp(config_get_sensor_name(i), "---") == 0) {
             continue;
         }
 
