@@ -1013,19 +1013,15 @@ static void process_frame_for_mqtt(const dlbus_frame_t *frame)
 
     // Heat meter 1
     bool heat1_active = (heat_reg & 0x01) != 0;
-    if (heat1_active) {
-        float power1 = decode_heat_power(&frame->data[FRAME_OFF_HEAT1]);
-        float energy1 = decode_heat_energy(&frame->data[FRAME_OFF_HEAT1]);
-        mqtt_ha_publish_heat_meter(0, power1, energy1, true);
-    }
+    float power1 = decode_heat_power(&frame->data[FRAME_OFF_HEAT1]);
+    float energy1 = decode_heat_energy(&frame->data[FRAME_OFF_HEAT1]);
+    mqtt_ha_add_heat_meter_sample(0, power1, energy1, heat1_active);
 
     // Heat meter 2
     bool heat2_active = (heat_reg & 0x02) != 0;
-    if (heat2_active) {
-        float power2 = decode_heat_power(&frame->data[FRAME_OFF_HEAT2]);
-        float energy2 = decode_heat_energy(&frame->data[FRAME_OFF_HEAT2]);
-        mqtt_ha_publish_heat_meter(1, power2, energy2, true);
-    }
+    float power2 = decode_heat_power(&frame->data[FRAME_OFF_HEAT2]);
+    float energy2 = decode_heat_energy(&frame->data[FRAME_OFF_HEAT2]);
+    mqtt_ha_add_heat_meter_sample(1, power2, energy2, heat2_active);
 }
 
 // =============================================================================

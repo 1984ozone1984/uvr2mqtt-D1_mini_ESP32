@@ -129,13 +129,18 @@ void mqtt_ha_publish_speeds(void);
 // =============================================================================
 
 /**
- * Publish heat meter data
+ * Add heat meter sample to buffer for interval-based publishing
  * @param meter_index Heat meter index (0 or 1)
  * @param power_kw Instantaneous power in kW
  * @param energy_kwh Total energy in kWh
  * @param active Heat meter active flag
  */
-void mqtt_ha_publish_heat_meter(int meter_index, float power_kw, float energy_kwh, bool active);
+void mqtt_ha_add_heat_meter_sample(int meter_index, float power_kw, float energy_kwh, bool active);
+
+/**
+ * Publish heat meter data (called on interval by mqtt_ha_loop)
+ */
+void mqtt_ha_publish_heat_meters(void);
 
 // =============================================================================
 // System Functions

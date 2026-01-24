@@ -39,6 +39,17 @@ static output_tracker_t output_tracker = {0};
 // Speed level tracking
 static speed_tracker_t speed_tracker = {0};
 
+// Heat meter tracking (buffer for interval-based publishing)
+#define NUM_HEAT_METERS 2
+typedef struct {
+    float power_samples[MAX_SENSOR_SAMPLES];
+    float energy_samples[MAX_SENSOR_SAMPLES];
+    int count;
+    int index;
+    bool active;
+} heat_meter_buffer_t;
+static heat_meter_buffer_t heat_meter_buffers[NUM_HEAT_METERS] = {0};
+
 // Configuration from io_config.h
 static const char *sensor_names[] = SENSOR_NAMES;
 static const char *output_names[] = OUTPUT_NAMES;
@@ -474,9 +485,29 @@ void mqtt_ha_publish_speeds(void)
 // Public Functions - Heat Meters
 // =============================================================================
 
-void mqtt_ha_publish_heat_meter(int meter_index, float power_kw, float energy_kwh, bool active)
+void mqtt_ha_add_heat_meter_sample(int meter_index, float power_kw, float energy_kwh, bool active)
 {
-    if (!mqtt_connected || meter_index < 0 || meter_index > 1) {
+    if (meter_index < 0 || meter_index >= NUM_HEAT_METERS) {
+        return;
+    }
+
+    heat_meter_buffer_t *buffer = &heat_meter_buffers[meter_index];
+    buffer->active = active;
+
+    if (active) {
+        // Add to circular buffer
+        buffer->power_samples[buffer->index] = power_kw;
+        buffer->energy_samples[buffer->index] = energy_kwh;
+        buffer->index = (buffer->index + 1) % MAX_SENSOR_SAMPLES;
+        if (buffer->count < MAX_SENSOR_SAMPLES) {
+            buffer->count++;
+        }
+    }
+}
+
+void mqtt_ha_publish_heat_meters(void)
+{
+    if (!mqtt_connected) {
         return;
     }
 
@@ -486,17 +517,51 @@ void mqtt_ha_publish_heat_meter(int meter_index, float power_kw, float energy_kw
     uint8_t qos = config_get_mqtt_qos();
     bool retain = config_get_mqtt_retain_sensors();
 
-    if (active) {
+    for (int i = 0; i < NUM_HEAT_METERS; i++) {
+        heat_meter_buffer_t *buffer = &heat_meter_buffers[i];
+
+        if (!buffer->active || buffer->count == 0) {
+            continue;
+        }
+
+        // Calculate median power
+        float temp_power[MAX_SENSOR_SAMPLES];
+        float temp_energy[MAX_SENSOR_SAMPLES];
+        int count = buffer->count < MAX_SENSOR_SAMPLES ? buffer->count : MAX_SENSOR_SAMPLES;
+
+        for (int j = 0; j < count; j++) {
+            temp_power[j] = buffer->power_samples[j];
+            temp_energy[j] = buffer->energy_samples[j];
+        }
+
+        qsort(temp_power, count, sizeof(float), float_compare);
+        qsort(temp_energy, count, sizeof(float), float_compare);
+
+        float median_power, median_energy;
+        if (count % 2 == 0) {
+            median_power = (temp_power[count / 2 - 1] + temp_power[count / 2]) / 2.0f;
+            median_energy = (temp_energy[count / 2 - 1] + temp_energy[count / 2]) / 2.0f;
+        } else {
+            median_power = temp_power[count / 2];
+            median_energy = temp_energy[count / 2];
+        }
+
         // Publish power
-        snprintf(topic, sizeof(topic), "%s/sensor/heat_meter_%d_power/state", base_topic, meter_index + 1);
-        snprintf(payload, sizeof(payload), "%.2f", power_kw);
+        snprintf(topic, sizeof(topic), "%s/sensor/heat_meter_%d_power/state", base_topic, i + 1);
+        snprintf(payload, sizeof(payload), "%.2f", median_power);
         esp_mqtt_client_publish(mqtt_client, topic, payload, 0, qos, retain);
 
         // Publish energy
-        snprintf(topic, sizeof(topic), "%s/sensor/heat_meter_%d_energy/state", base_topic, meter_index + 1);
-        snprintf(payload, sizeof(payload), "%.1f", energy_kwh);
+        snprintf(topic, sizeof(topic), "%s/sensor/heat_meter_%d_energy/state", base_topic, i + 1);
+        snprintf(payload, sizeof(payload), "%.1f", median_energy);
         esp_mqtt_client_publish(mqtt_client, topic, payload, 0, qos, retain);
+
+        // Clear buffer after publishing
+        buffer->count = 0;
+        buffer->index = 0;
     }
+
+    ESP_LOGI(TAG, "Published heat meter values");
 }
 
 // =============================================================================
@@ -769,10 +834,11 @@ void mqtt_ha_loop(void)
 {
     uint32_t now = xTaskGetTickCount() / configTICK_RATE_HZ;
 
-    // Publish sensors on interval (from config store)
+    // Publish sensors and heat meters on interval (from config store)
     uint16_t sensor_interval = config_get_publish_interval_sensors();
     if (now - last_sensor_publish >= sensor_interval) {
         mqtt_ha_publish_sensors();
+        mqtt_ha_publish_heat_meters();
         last_sensor_publish = now;
     }
 
