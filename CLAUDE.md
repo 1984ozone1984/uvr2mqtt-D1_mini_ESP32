@@ -35,8 +35,9 @@ GPIO26 ISR -> Edge Buffer (2048) -> Bit Extractor Task -> Bit Queue (1024)
 | `src/webserver.h` | Webserver public API |
 | `src/mqtt_ha.c` | MQTT client, Home Assistant discovery |
 | `src/mqtt_ha.h` | MQTT module public API |
-| `src/io_config.h` | Sensor/output name arrays from Kconfig |
+| `src/io_config.h` | Sensor/output name defaults from Kconfig |
 | `src/Kconfig.projbuild` | ESP-IDF menuconfig definitions |
+| `partitions.csv` | OTA-compatible partition table |
 
 ## Configuration System
 
@@ -58,6 +59,12 @@ GPIO26 ISR -> Edge Buffer (2048) -> Bit Extractor Task -> Bit Queue (1024)
 const char *config_get_hostname(void);
 const char *config_get_mqtt_broker_uri(void);
 uint16_t config_get_publish_interval_sensors(void);
+
+// I/O names (editable via web UI)
+const char *config_get_sensor_name(int index);  // 0-15 for S1-S16
+esp_err_t config_set_sensor_name(int index, const char *name);
+const char *config_get_output_name(int index);  // 0-12 for A1-A13
+esp_err_t config_set_output_name(int index, const char *name);
 
 // Secrets (never logged, copy to caller buffer)
 bool config_has_wifi_credentials(void);
@@ -121,14 +128,13 @@ Located in `src/Kconfig.projbuild`:
 - `UVR_HA_DISCOVERY_PREFIX` - HA discovery prefix (default: homeassistant)
 
 **Publish Intervals:**
-- `UVR_PUBLISH_INTERVAL_SENSORS` - Sensor values (default: 30s)
+- `UVR_PUBLISH_INTERVAL_SENSORS` - Sensors, heat meters, system info (default: 30s)
 - `UVR_PUBLISH_INTERVAL_OUTPUTS` - Output states (default: 30s)
-- `UVR_PUBLISH_INTERVAL_SYSTEM` - System info (default: 60s)
 
-**I/O Names:**
+**I/O Names (Kconfig defaults, editable via web UI):**
 - Sensor names S1-S16
 - Output names A1-A13
-- Speed level names
+- Speed level names (Kconfig only)
 
 ## DL-Bus Protocol Details
 
@@ -155,18 +161,32 @@ The device provides a web-based configuration UI:
 
 **Endpoints**:
 - `GET /` - Main status page with sensor/output data
+- `GET /config` - Configuration page
 - `GET /api/status` - System status JSON
-- `GET /api/sensors` - Live sensor values JSON
-- `GET /api/outputs` - Live output states JSON
-- `POST /api/config/wifi` - Update WiFi settings
-- `POST /api/config/mqtt` - Update MQTT settings
-- `POST /api/reboot` - Restart device
+- `POST /config/wifi` - Update WiFi settings
+- `POST /config/mqtt` - Update MQTT settings
+- `POST /config/io` - Update sensor/output names
+- `POST /ota` - Upload firmware update
+- `POST /reboot` - Restart device
 
 **Features**:
 - Real-time sensor and output display
 - WiFi and MQTT configuration forms
+- Sensor and output name editing (S1-S16, A1-A13)
+- OTA firmware update with progress indicator
+- Current firmware version display
 - Settings saved to NVS (persist across reboots)
 - Works in both STA and AP modes
+
+## OTA Firmware Update
+
+The device supports over-the-air firmware updates:
+
+- Custom partition table with two OTA partitions (1.75MB each)
+- Upload via web interface at `/config` page
+- Validates firmware header before flashing
+- Auto-reboot after successful update
+- First flash requires USB; subsequent updates via OTA
 
 ## Development Notes
 

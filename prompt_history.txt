@@ -1340,3 +1340,76 @@ MERGED TO MAIN:
 Pull request #1 (feature/webserver-config) merged to main.
 
 ================================================================================
+ITERATION 9 - 2026-01-24 (Bug Fixes & New Features)
+================================================================================
+
+USER PROMPTS:
+-------------
+1. "heat_meter power and energy are updating every frame and not with the set interval"
+2. "I also want to edit Sensor and output names via webserver"
+3. "if there is enough memory left add OTA firmware update"
+4. "system parameters like mac and uptime should also publish with standard interval"
+5. "hostname should also be the name in mqtt publish and homeassistant discovery"
+
+WHAT WAS DONE:
+--------------
+
+1. HEAT METER INTERVAL FIX:
+   - Heat meters were publishing every DL-Bus frame instead of using interval
+   - Added heat_meter_buffer_t for buffering power/energy samples
+   - Replaced mqtt_ha_publish_heat_meter() with mqtt_ha_add_heat_meter_sample()
+   - Added mqtt_ha_publish_heat_meters() that calculates median
+   - Heat meters now publish on sensor interval (default 30s)
+
+2. I/O NAMES VIA WEB UI:
+   - Added sensor_names[16] and output_names[13] to config_store
+   - Added config_get_sensor_name(), config_set_sensor_name()
+   - Added config_get_output_name(), config_set_output_name()
+   - Names stored in NVS with Kconfig fallback
+   - Added I/O Names section to /config page (forms for S1-S16, A1-A13)
+   - Added POST /config/io endpoint
+   - Updated mqtt_ha.c, main.c, webserver.c to use config functions
+
+3. OTA FIRMWARE UPDATE:
+   - Created partitions.csv with OTA-compatible layout (two 1.75MB partitions)
+   - Updated platformio.ini to use custom partition table
+   - Added OTA update section to /config page with:
+     - Current firmware version and build date display
+     - File picker for .bin firmware files
+     - JavaScript upload with progress indicator
+   - Added POST /ota endpoint with:
+     - Firmware header validation
+     - 4KB chunk writing to flash
+     - Auto-reboot on success
+
+4. SYSTEM INFO INTERVAL FIX:
+   - System info (MAC, IP, uptime) was on separate interval
+   - Now publishes together with sensors on sensor_interval
+   - Removed last_system_publish variable
+
+5. HOSTNAME IN HOME ASSISTANT:
+   - Device name in HA discovery was hardcoded "UVR1611 Gateway"
+   - Now uses config_get_hostname() for device name
+   - Updated publish_ha_sensor_discovery()
+   - Updated publish_ha_binary_sensor_discovery()
+   - Renamed "UVR1611 Uptime" to just "Uptime"
+
+NEW/MODIFIED FILES:
+-------------------
+- partitions.csv: New OTA partition table
+- platformio.ini: Added board_build.partitions
+- src/config_store.h: Added I/O name functions
+- src/config_store.c: Implemented I/O name storage
+- src/mqtt_ha.c: Heat meter buffering, hostname in discovery, interval fixes
+- src/mqtt_ha.h: New heat meter API
+- src/webserver.c: I/O names form, OTA update handler
+- src/main.c: Use config functions for I/O names
+
+BUILD RESULT:
+-------------
+RAM:   15.7% (51408 / 327680 bytes)
+Flash: 97.3% (1019893 / 1048576 bytes) - before OTA partition change
+
+With OTA partitions: ~1.75MB available per partition (plenty of room)
+
+================================================================================

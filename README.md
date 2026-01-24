@@ -34,8 +34,10 @@ ESP32-based gateway that reads data from a Technische Alternative UVR1611 solar 
 - Built-in web UI for configuration (no rebuild required)
 - WiFi STA/AP mode with automatic fallback
 - Configure WiFi and MQTT settings via browser
+- Edit sensor and output names (S1-S16, A1-A13)
 - Live sensor and output status display
 - Settings stored in NVS (persist across reboots)
+- OTA firmware update via web browser
 
 ## Screenshots
 
@@ -86,11 +88,26 @@ ESP32-based gateway that reads data from a Technische Alternative UVR1611 solar 
 
 ### Sensor & Output Names
 
-Configure via ESP-IDF menuconfig:
+**Via Web UI (recommended):**
+- Go to the `/config` page
+- Edit names for sensors S1-S16 and outputs A1-A13
+- Changes take effect immediately for web display
+- Reboot to update MQTT topics and Home Assistant
+
+**Via menuconfig (compile-time defaults):**
 ```bash
 pio run -t menuconfig
 ```
 Navigate to: "UVR1611 I/O Configuration"
+
+### OTA Firmware Update
+
+After initial USB flash, firmware can be updated via web browser:
+1. Go to the `/config` page
+2. Find "Firmware Update" section
+3. Select new `.bin` firmware file
+4. Click "Upload & Update Firmware"
+5. Device reboots automatically with new firmware
 
 ## Building
 
@@ -125,11 +142,14 @@ uvr1611/system/uptime                   # Uptime in seconds
 
 ## Home Assistant
 
-All entities are automatically discovered via MQTT discovery. They appear under a single device "UVR1611 Gateway" with:
+All entities are automatically discovered via MQTT discovery. They appear under a single device with your configured hostname:
 - Temperature sensors with proper device class
 - Binary sensors for outputs (pumps, valves)
 - Numeric sensors for speed levels
 - Power and energy sensors for heat meters
+- System uptime sensor
+
+Change the device name by editing the hostname in the web UI and rebooting.
 
 ## Protocol Details
 
@@ -168,13 +188,15 @@ WiFi/MQTT (Core 0) ◄───────────────────�
 
 ## Status
 
-**Phase 1, 2 & 3 Complete**:
+**All Phases Complete**:
 - DL-Bus decoding: 0% error rate
 - All sensor types parsed correctly
 - MQTT publishing working
 - Home Assistant auto-discovery working
 - Web-based configuration UI working
 - WiFi STA/AP mode with auto-fallback working
+- Sensor/output name editing via web UI
+- OTA firmware update via web browser
 
 ## License
 
