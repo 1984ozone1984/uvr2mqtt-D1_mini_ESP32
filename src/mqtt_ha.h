@@ -162,6 +162,23 @@ const system_info_t* mqtt_ha_get_system_info(void);
 void mqtt_ha_publish_discovery(void);
 
 // =============================================================================
+// Data Export Functions (for webserver)
+// =============================================================================
+
+/**
+ * Get current sensor values for display
+ * @param values Output array of NUM_SENSORS floats
+ * @param valid Output array of NUM_SENSORS bools indicating valid data
+ */
+void mqtt_ha_get_sensor_values(float values[NUM_SENSORS], bool valid[NUM_SENSORS]);
+
+/**
+ * Get current output states for display
+ * @param states Output array of NUM_OUTPUTS bools
+ */
+void mqtt_ha_get_output_states(bool states[NUM_OUTPUTS]);
+
+// =============================================================================
 // Status Functions
 // =============================================================================
 

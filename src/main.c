@@ -35,6 +35,8 @@
 #include "io_config.h"
 #include "config_store.h"
 #include "mqtt_ha.h"
+#include "wifi_manager.h"
+#include "webserver.h"
 
 static const char *TAG = "DL-BUS";
 
@@ -1203,20 +1205,55 @@ void app_main(void)
     }
 
     // ==========================================================================
-    // Initialize MQTT and WiFi (runs on Core 0)
+    // Initialize WiFi Manager (handles STA/AP mode switching)
     // ==========================================================================
-    ESP_LOGI(TAG, "Initializing MQTT...");
-    if (mqtt_ha_init() != ESP_OK) {
-        ESP_LOGE(TAG, "MQTT initialization failed!");
-        // Continue without MQTT - DL-Bus reading will still work
+    ESP_LOGI(TAG, "Initializing WiFi Manager...");
+    if (wifi_manager_init() != ESP_OK) {
+        ESP_LOGE(TAG, "WiFi Manager initialization failed!");
     } else {
-        ESP_LOGI(TAG, "Starting WiFi and MQTT...");
-        if (mqtt_ha_start() != ESP_OK) {
-            ESP_LOGW(TAG, "MQTT start failed - continuing without MQTT");
+        ESP_LOGI(TAG, "Starting WiFi (STA mode or AP fallback)...");
+        wifi_manager_start();  // Connects to WiFi or starts AP mode
+
+        char ip[16], mac[18];
+        wifi_manager_get_ip(ip, sizeof(ip));
+        wifi_manager_get_mac(mac, sizeof(mac));
+
+        if (wifi_manager_is_ap_mode()) {
+            char ap_ssid[32];
+            wifi_manager_get_ap_ssid(ap_ssid, sizeof(ap_ssid));
+            ESP_LOGW(TAG, "Started in AP mode: SSID=%s, IP=%s", ap_ssid, ip);
         } else {
-            const system_info_t *sys_info = mqtt_ha_get_system_info();
-            ESP_LOGI(TAG, "WiFi connected: IP=%s, MAC=%s", sys_info->ip_address, sys_info->mac_address);
+            ESP_LOGI(TAG, "WiFi connected: IP=%s, MAC=%s", ip, mac);
         }
+    }
+
+    // ==========================================================================
+    // Start Web Server (works in both STA and AP modes)
+    // ==========================================================================
+    ESP_LOGI(TAG, "Starting web server...");
+    if (webserver_start() != ESP_OK) {
+        ESP_LOGE(TAG, "Web server start failed!");
+    } else {
+        ESP_LOGI(TAG, "Web server started on port 80");
+    }
+
+    // ==========================================================================
+    // Initialize MQTT (only if WiFi connected in STA mode)
+    // ==========================================================================
+    if (wifi_manager_is_connected()) {
+        ESP_LOGI(TAG, "Initializing MQTT...");
+        if (mqtt_ha_init() != ESP_OK) {
+            ESP_LOGE(TAG, "MQTT initialization failed!");
+        } else {
+            ESP_LOGI(TAG, "Starting MQTT client...");
+            if (mqtt_ha_start() != ESP_OK) {
+                ESP_LOGW(TAG, "MQTT start failed - continuing without MQTT");
+            } else {
+                ESP_LOGI(TAG, "MQTT client started");
+            }
+        }
+    } else {
+        ESP_LOGW(TAG, "WiFi not connected - MQTT disabled");
     }
 
     printf("\n--- Waiting for frames ---\n\n");
@@ -1254,7 +1291,9 @@ void app_main(void)
             printf("  Frames valid:    %lu\n", (unsigned long)stat_frames_valid);
             printf("  Edge buffer:     %lu/%d\n", (unsigned long)edge_buffer_count(&edge_buffer), EDGE_BUFFER_SIZE);
             printf("  Bit queue:       %lu/%d\n", (unsigned long)uxQueueMessagesWaiting(bit_queue), BIT_QUEUE_SIZE);
+            printf("  WiFi mode:       %s\n", wifi_manager_is_ap_mode() ? "AP" : "STA");
             printf("  MQTT connected:  %s\n", mqtt_ha_is_connected() ? "Yes" : "No");
+            printf("  Webserver:       %s\n", webserver_is_running() ? "Running" : "Stopped");
             printf("--------------------------------------------\n\n");
             last_stats_time = now;
         }

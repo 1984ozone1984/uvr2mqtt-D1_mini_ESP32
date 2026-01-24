@@ -12,12 +12,8 @@
 #include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/event_groups.h"
 #include "esp_system.h"
-#include "esp_wifi.h"
-#include "esp_event.h"
 #include "esp_log.h"
-#include "esp_netif.h"
 #include "esp_mac.h"
 #include "mqtt_client.h"
 
@@ -26,13 +22,6 @@
 #include "io_config.h"
 
 static const char *TAG = "MQTT-HA";
-
-// =============================================================================
-// WiFi Event Group
-// =============================================================================
-static EventGroupHandle_t wifi_event_group;
-#define WIFI_CONNECTED_BIT  BIT0
-#define WIFI_FAIL_BIT       BIT1
 
 // =============================================================================
 // Global State
@@ -143,37 +132,6 @@ static void get_device_id(char *device_id, size_t len)
 }
 
 // =============================================================================
-// WiFi Event Handler
-// =============================================================================
-static void wifi_event_handler(void *arg, esp_event_base_t event_base,
-                               int32_t event_id, void *event_data)
-{
-    static int retry_count = 0;
-
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        system_info.wifi_connected = false;
-        if (retry_count < 10) {
-            esp_wifi_connect();
-            retry_count++;
-            ESP_LOGI(TAG, "Retrying WiFi connection (%d/10)...", retry_count);
-        } else {
-            xEventGroupSetBits(wifi_event_group, WIFI_FAIL_BIT);
-            ESP_LOGE(TAG, "WiFi connection failed after 10 retries");
-        }
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-        snprintf(system_info.ip_address, sizeof(system_info.ip_address),
-                 IPSTR, IP2STR(&event->ip_info.ip));
-        ESP_LOGI(TAG, "Got IP: %s", system_info.ip_address);
-        system_info.wifi_connected = true;
-        retry_count = 0;
-        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
-    }
-}
-
-// =============================================================================
 // MQTT Event Handler
 // =============================================================================
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
@@ -213,86 +171,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         default:
             break;
     }
-}
-
-// =============================================================================
-// WiFi Initialization
-// =============================================================================
-static esp_err_t wifi_init(void)
-{
-    // Check if WiFi credentials are configured
-    if (!config_has_wifi_credentials()) {
-        ESP_LOGE(TAG, "WiFi credentials not configured!");
-        ESP_LOGE(TAG, "Use webserver or serial console to set credentials");
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    wifi_event_group = xEventGroupCreate();
-
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                    &wifi_event_handler, NULL, &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                    &wifi_event_handler, NULL, &instance_got_ip));
-
-    // Get credentials from config store (secure, never logged)
-    wifi_config_t wifi_config = {
-        .sta = {
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-        },
-    };
-
-    // Copy SSID and password from config store to wifi_config
-    // These are copied to local buffers and never logged
-    char ssid_buf[CONFIG_WIFI_SSID_MAX_LEN];
-    char pass_buf[CONFIG_WIFI_PASSWORD_MAX_LEN];
-
-    if (config_get_wifi_ssid(ssid_buf, sizeof(ssid_buf)) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get WiFi SSID");
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    // Password might be empty for open networks
-    if (config_get_wifi_password(pass_buf, sizeof(pass_buf)) != ESP_OK) {
-        pass_buf[0] = '\0';
-        wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
-    }
-
-    // Copy to wifi_config (strncpy for safety)
-    strncpy((char *)wifi_config.sta.ssid, ssid_buf, sizeof(wifi_config.sta.ssid) - 1);
-    strncpy((char *)wifi_config.sta.password, pass_buf, sizeof(wifi_config.sta.password) - 1);
-
-    // Clear sensitive data from stack
-    memset(ssid_buf, 0, sizeof(ssid_buf));
-    memset(pass_buf, 0, sizeof(pass_buf));
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-
-    // Clear wifi_config passwords from memory after setting
-    memset(wifi_config.sta.password, 0, sizeof(wifi_config.sta.password));
-
-    // Disable power save mode to reduce WiFi interrupt frequency
-    // This helps DL-Bus timing-critical interrupt handling
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
-
-    // Get MAC address
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    snprintf(system_info.mac_address, sizeof(system_info.mac_address),
-             "%02X:%02X:%02X:%02X:%02X:%02X",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-
-    ESP_LOGI(TAG, "WiFi initialized");
-    return ESP_OK;
 }
 
 // =============================================================================
@@ -364,14 +242,15 @@ esp_err_t mqtt_ha_init(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Initialize WiFi
-    esp_err_t err = wifi_init();
-    if (err != ESP_OK) {
-        return err;
-    }
+    // Get MAC address for system info
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(system_info.mac_address, sizeof(system_info.mac_address),
+             "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
-    // Initialize MQTT
-    err = mqtt_init();
+    // Initialize MQTT client
+    esp_err_t err = mqtt_init();
     if (err != ESP_OK) {
         return err;
     }
@@ -382,24 +261,20 @@ esp_err_t mqtt_ha_init(void)
 
 esp_err_t mqtt_ha_start(void)
 {
-    ESP_LOGI(TAG, "Starting WiFi...");
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    // Wait for connection with configurable timeout
-    uint16_t timeout_s = config_get_wifi_timeout();
-    EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
-                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                           pdFALSE, pdFALSE,
-                                           pdMS_TO_TICKS(timeout_s * 1000));
-
-    if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "WiFi connected, starting MQTT...");
-        ESP_ERROR_CHECK(esp_mqtt_client_start(mqtt_client));
-        return ESP_OK;
-    } else {
-        ESP_LOGE(TAG, "WiFi connection failed (timeout: %ds)", timeout_s);
-        return ESP_FAIL;
+    if (mqtt_client == NULL) {
+        ESP_LOGE(TAG, "MQTT client not initialized");
+        return ESP_ERR_INVALID_STATE;
     }
+
+    ESP_LOGI(TAG, "Starting MQTT client...");
+    esp_err_t err = esp_mqtt_client_start(mqtt_client);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start MQTT client: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    system_info.wifi_connected = true;  // Assume WiFi is managed externally
+    return ESP_OK;
 }
 
 // =============================================================================
@@ -863,6 +738,31 @@ void mqtt_ha_publish_discovery(void)
 bool mqtt_ha_is_connected(void)
 {
     return mqtt_connected;
+}
+
+// =============================================================================
+// Data Export Functions (for webserver)
+// =============================================================================
+
+void mqtt_ha_get_sensor_values(float values[NUM_SENSORS], bool valid[NUM_SENSORS])
+{
+    for (int i = 0; i < NUM_SENSORS; i++) {
+        sensor_buffer_t *buffer = &sensor_buffers[i];
+        if (buffer->count > 0) {
+            values[i] = calculate_median(buffer);
+            valid[i] = true;
+        } else {
+            values[i] = 0.0f;
+            valid[i] = false;
+        }
+    }
+}
+
+void mqtt_ha_get_output_states(bool states[NUM_OUTPUTS])
+{
+    for (int i = 0; i < NUM_OUTPUTS; i++) {
+        states[i] = output_tracker.states[i];
+    }
 }
 
 void mqtt_ha_loop(void)
