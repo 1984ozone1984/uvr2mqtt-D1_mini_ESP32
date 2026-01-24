@@ -155,6 +155,24 @@ uvr1611/system/ip           -> IP address
 uvr1611/system/uptime       -> Uptime seconds
 ```
 
+## Home Assistant Auto-Discovery
+
+All entities are automatically discovered via MQTT with proper device grouping:
+
+**Sensor Entities:**
+- Temperature/flow sensors (S1-S16) with proper device_class
+- Speed level sensors (A1, A2, A6, A7)
+- Heat meter power (kW) and energy (kWh)
+- System uptime
+
+**Binary Sensor Entities:**
+- Output states (A1-A13) for pumps, valves, mixers
+
+**Diagnostic Entities:**
+- IP Address (entity_category: diagnostic)
+- MAC Address (entity_category: diagnostic)
+- Connectivity Status (binary_sensor with device_class: connectivity)
+
 ## Web Configuration Interface
 
 The device provides a web-based configuration UI:

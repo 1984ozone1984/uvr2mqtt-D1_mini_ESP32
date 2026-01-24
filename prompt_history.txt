@@ -1413,3 +1413,62 @@ Flash: 97.3% (1019893 / 1048576 bytes) - before OTA partition change
 With OTA partitions: ~1.75MB available per partition (plenty of room)
 
 ================================================================================
+ITERATION 10 - 2026-01-24 (Home Assistant Diagnostic Entities)
+================================================================================
+
+USER PROMPT:
+------------
+"the status, IP address and MAC address are missing in the homeassistant mqtt
+autodiscovery"
+
+PROBLEM:
+--------
+While the device was publishing status, IP, and MAC to MQTT topics, these values
+were not appearing in Home Assistant because they lacked autodiscovery
+configuration messages.
+
+WHAT WAS DONE:
+--------------
+
+1. Added Home Assistant autodiscovery for three new diagnostic entities:
+
+   a) IP Address Sensor:
+      - Discovery topic: homeassistant/sensor/{device_id}/system_ip/config
+      - State topic: {base_topic}/system/ip
+      - entity_category: diagnostic
+      - icon: mdi:ip-network
+
+   b) MAC Address Sensor:
+      - Discovery topic: homeassistant/sensor/{device_id}/system_mac/config
+      - State topic: {base_topic}/system/mac
+      - entity_category: diagnostic
+      - icon: mdi:network-outline
+
+   c) Connectivity Status Binary Sensor:
+      - Discovery topic: homeassistant/binary_sensor/{device_id}/system_status/config
+      - State topic: {base_topic}/status
+      - device_class: connectivity
+      - entity_category: diagnostic
+      - payload_on: "online"
+      - payload_off: "offline"
+
+2. Fixed IP address not being published:
+   - Added #include "wifi_manager.h" to mqtt_ha.c
+   - Call wifi_manager_get_ip() before publishing IP address
+   - Also updated mqtt_ha_get_system_info() for webserver display
+
+FILES MODIFIED:
+---------------
+- src/mqtt_ha.c: Added autodiscovery for diagnostic entities, fixed IP publishing
+- CLAUDE.md: Added Home Assistant auto-discovery documentation
+- README.md: Added PCB folder mention and diagnostic entities
+- prompt_history.txt: This update
+
+RESULT:
+-------
+All three diagnostic entities now appear in Home Assistant under the device:
+- IP Address (diagnostic section)
+- MAC Address (diagnostic section)
+- Status (connectivity, diagnostic section)
+
+================================================================================

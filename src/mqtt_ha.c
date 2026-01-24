@@ -20,6 +20,7 @@
 #include "mqtt_ha.h"
 #include "config_store.h"
 #include "io_config.h"
+#include "wifi_manager.h"
 
 static const char *TAG = "MQTT-HA";
 
@@ -585,6 +586,7 @@ void mqtt_ha_publish_system_info(void)
     esp_mqtt_client_publish(mqtt_client, topic, system_info.mac_address, 0, qos, true);
 
     // Publish IP address
+    wifi_manager_get_ip(system_info.ip_address, sizeof(system_info.ip_address));
     snprintf(topic, sizeof(topic), "%s/system/ip", base_topic);
     esp_mqtt_client_publish(mqtt_client, topic, system_info.ip_address, 0, qos, true);
 
@@ -599,6 +601,7 @@ void mqtt_ha_publish_system_info(void)
 const system_info_t* mqtt_ha_get_system_info(void)
 {
     system_info.uptime_seconds = xTaskGetTickCount() / configTICK_RATE_HZ;
+    wifi_manager_get_ip(system_info.ip_address, sizeof(system_info.ip_address));
     return &system_info;
 }
 
@@ -792,6 +795,91 @@ void mqtt_ha_publish_discovery(void)
     snprintf(state_topic, sizeof(state_topic), "%s/system/uptime", base_topic);
     publish_ha_sensor_discovery("Uptime", "duration", "s",
                                 state_topic, "system_uptime", device_id);
+
+    // IP Address (diagnostic entity)
+    {
+        char topic[MQTT_TOPIC_MAX_LEN];
+        char payload[MQTT_PAYLOAD_MAX_LEN];
+        const char *ha_prefix = config_get_ha_discovery_prefix();
+        const char *hostname = config_get_hostname();
+        uint8_t qos = config_get_mqtt_qos();
+        snprintf(topic, sizeof(topic), "%s/sensor/%s/system_ip/config",
+                 ha_prefix, device_id);
+        snprintf(payload, sizeof(payload),
+            "{"
+            "\"name\":\"IP Address\","
+            "\"state_topic\":\"%s/system/ip\","
+            "\"unique_id\":\"%s_system_ip\","
+            "\"entity_category\":\"diagnostic\","
+            "\"icon\":\"mdi:ip-network\","
+            "\"availability_topic\":\"%s/status\","
+            "\"device\":{"
+                "\"identifiers\":[\"%s\"],"
+                "\"name\":\"%s\","
+                "\"model\":\"UVR1611\","
+                "\"manufacturer\":\"Technische Alternative\""
+            "}"
+            "}",
+            base_topic, device_id, base_topic, device_id, hostname);
+        esp_mqtt_client_publish(mqtt_client, topic, payload, 0, qos, true);
+    }
+
+    // MAC Address (diagnostic entity)
+    {
+        char topic[MQTT_TOPIC_MAX_LEN];
+        char payload[MQTT_PAYLOAD_MAX_LEN];
+        const char *ha_prefix = config_get_ha_discovery_prefix();
+        const char *hostname = config_get_hostname();
+        uint8_t qos = config_get_mqtt_qos();
+        snprintf(topic, sizeof(topic), "%s/sensor/%s/system_mac/config",
+                 ha_prefix, device_id);
+        snprintf(payload, sizeof(payload),
+            "{"
+            "\"name\":\"MAC Address\","
+            "\"state_topic\":\"%s/system/mac\","
+            "\"unique_id\":\"%s_system_mac\","
+            "\"entity_category\":\"diagnostic\","
+            "\"icon\":\"mdi:network-outline\","
+            "\"availability_topic\":\"%s/status\","
+            "\"device\":{"
+                "\"identifiers\":[\"%s\"],"
+                "\"name\":\"%s\","
+                "\"model\":\"UVR1611\","
+                "\"manufacturer\":\"Technische Alternative\""
+            "}"
+            "}",
+            base_topic, device_id, base_topic, device_id, hostname);
+        esp_mqtt_client_publish(mqtt_client, topic, payload, 0, qos, true);
+    }
+
+    // Connectivity Status (binary sensor)
+    {
+        char topic[MQTT_TOPIC_MAX_LEN];
+        char payload[MQTT_PAYLOAD_MAX_LEN];
+        const char *ha_prefix = config_get_ha_discovery_prefix();
+        const char *hostname = config_get_hostname();
+        uint8_t qos = config_get_mqtt_qos();
+        snprintf(topic, sizeof(topic), "%s/binary_sensor/%s/system_status/config",
+                 ha_prefix, device_id);
+        snprintf(payload, sizeof(payload),
+            "{"
+            "\"name\":\"Status\","
+            "\"state_topic\":\"%s/status\","
+            "\"unique_id\":\"%s_system_status\","
+            "\"device_class\":\"connectivity\","
+            "\"entity_category\":\"diagnostic\","
+            "\"payload_on\":\"online\","
+            "\"payload_off\":\"offline\","
+            "\"device\":{"
+                "\"identifiers\":[\"%s\"],"
+                "\"name\":\"%s\","
+                "\"model\":\"UVR1611\","
+                "\"manufacturer\":\"Technische Alternative\""
+            "}"
+            "}",
+            base_topic, device_id, device_id, hostname);
+        esp_mqtt_client_publish(mqtt_client, topic, payload, 0, qos, true);
+    }
 
     ESP_LOGI(TAG, "Home Assistant discovery published");
 }

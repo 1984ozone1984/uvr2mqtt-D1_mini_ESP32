@@ -6,6 +6,7 @@ ESP32-based gateway that reads data from a Technische Alternative UVR1611 solar 
 
 - **Board**: Azdelivery D1 Mini ESP32 (ESP32-WROOM-32)
 - **Connection**: DL-Bus via optocoupler to GPIO26
+- **PCB Files**: KiCad schematic and PCB design files available in the `PCB/` folder, including Gerber files for manufacturing
 
 ## Features
 
@@ -148,6 +149,7 @@ All entities are automatically discovered via MQTT discovery. They appear under 
 - Numeric sensors for speed levels
 - Power and energy sensors for heat meters
 - System uptime sensor
+- Diagnostic entities (IP address, MAC address, connectivity status)
 
 Change the device name by editing the hostname in the web UI and rebooting.
 
