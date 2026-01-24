@@ -56,7 +56,7 @@ static const char *speed_level_names[] = SPEED_LEVEL_NAMES;
 // Timing
 static uint32_t last_sensor_publish = 0;
 static uint32_t last_output_publish = 0;
-static uint32_t last_system_publish = 0;
+// last_system_publish removed - system info now publishes with sensors
 static uint32_t last_discovery_publish = 0;
 
 // =============================================================================
@@ -622,6 +622,7 @@ static void publish_ha_sensor_discovery(const char *name, const char *device_cla
     snprintf(topic, sizeof(topic), "%s/sensor/%s/%s/config",
              ha_prefix, device_id, sanitized_id);
 
+    const char *hostname = config_get_hostname();
     int len = snprintf(payload, sizeof(payload),
         "{"
         "\"name\":\"%s\","
@@ -629,11 +630,11 @@ static void publish_ha_sensor_discovery(const char *name, const char *device_cla
         "\"unique_id\":\"%s_%s\","
         "\"device\":{"
             "\"identifiers\":[\"%s\"],"
-            "\"name\":\"UVR1611 Gateway\","
+            "\"name\":\"%s\","
             "\"model\":\"UVR1611\","
             "\"manufacturer\":\"Technische Alternative\""
         "}",
-        name, state_topic, device_id, sanitized_id, device_id);
+        name, state_topic, device_id, sanitized_id, device_id, hostname);
 
     if (device_class != NULL && strlen(device_class) > 0) {
         len += snprintf(payload + len, sizeof(payload) - len,
@@ -670,6 +671,7 @@ static void publish_ha_binary_sensor_discovery(const char *name, const char *dev
     snprintf(topic, sizeof(topic), "%s/binary_sensor/%s/%s/config",
              ha_prefix, device_id, sanitized_id);
 
+    const char *hostname = config_get_hostname();
     snprintf(payload, sizeof(payload),
         "{"
         "\"name\":\"%s\","
@@ -681,13 +683,13 @@ static void publish_ha_binary_sensor_discovery(const char *name, const char *dev
         "\"availability_topic\":\"%s/status\","
         "\"device\":{"
             "\"identifiers\":[\"%s\"],"
-            "\"name\":\"UVR1611 Gateway\","
+            "\"name\":\"%s\","
             "\"model\":\"UVR1611\","
             "\"manufacturer\":\"Technische Alternative\""
         "}"
         "}",
         name, state_topic, device_id, sanitized_id, device_class,
-        base_topic, device_id);
+        base_topic, device_id, hostname);
 
     esp_mqtt_client_publish(mqtt_client, topic, payload, 0, qos, true);
 }
@@ -788,7 +790,7 @@ void mqtt_ha_publish_discovery(void)
     // System Sensors
     // ==========================================================================
     snprintf(state_topic, sizeof(state_topic), "%s/system/uptime", base_topic);
-    publish_ha_sensor_discovery("UVR1611 Uptime", "duration", "s",
+    publish_ha_sensor_discovery("Uptime", "duration", "s",
                                 state_topic, "system_uptime", device_id);
 
     ESP_LOGI(TAG, "Home Assistant discovery published");
@@ -832,11 +834,12 @@ void mqtt_ha_loop(void)
 {
     uint32_t now = xTaskGetTickCount() / configTICK_RATE_HZ;
 
-    // Publish sensors and heat meters on interval (from config store)
+    // Publish sensors, heat meters, and system info on interval (from config store)
     uint16_t sensor_interval = config_get_publish_interval_sensors();
     if (now - last_sensor_publish >= sensor_interval) {
         mqtt_ha_publish_sensors();
         mqtt_ha_publish_heat_meters();
+        mqtt_ha_publish_system_info();
         last_sensor_publish = now;
     }
 
@@ -846,13 +849,6 @@ void mqtt_ha_loop(void)
         mqtt_ha_publish_outputs();
         mqtt_ha_publish_speeds();
         last_output_publish = now;
-    }
-
-    // Publish system info on interval
-    uint16_t system_interval = config_get_publish_interval_system();
-    if (now - last_system_publish >= system_interval) {
-        mqtt_ha_publish_system_info();
-        last_system_publish = now;
     }
 
     // Re-publish discovery on interval (if configured > 0)
