@@ -218,8 +218,16 @@ static void load_kconfig_defaults(void)
     strncpy(s_config.ha_discovery_prefix, CONFIG_UVR_HA_DISCOVERY_PREFIX, sizeof(s_config.ha_discovery_prefix) - 1);
     s_config.mqtt_keepalive = CONFIG_UVR_MQTT_KEEPALIVE;
     s_config.mqtt_qos = CONFIG_UVR_MQTT_QOS;
-    s_config.mqtt_retain_sensors = CONFIG_UVR_MQTT_RETAIN_SENSORS;
-    s_config.mqtt_retain_status = CONFIG_UVR_MQTT_RETAIN_STATUS;
+#ifdef CONFIG_UVR_MQTT_RETAIN_SENSORS
+    s_config.mqtt_retain_sensors = 1;
+#else
+    s_config.mqtt_retain_sensors = 0;
+#endif
+#ifdef CONFIG_UVR_MQTT_RETAIN_STATUS
+    s_config.mqtt_retain_status = 1;
+#else
+    s_config.mqtt_retain_status = 0;
+#endif
 
     // Publish intervals
     s_config.interval_sensors = CONFIG_UVR_PUBLISH_INTERVAL_SENSORS;
