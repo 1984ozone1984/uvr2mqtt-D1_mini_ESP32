@@ -191,7 +191,7 @@ WiFi/MQTT (Core 0) ◄───────────────────�
 ## Status
 
 **All Phases Complete**:
-- DL-Bus decoding: 0% error rate
+- DL-Bus decoding: 0.2% error rate
 - All sensor types parsed correctly
 - MQTT publishing working
 - Home Assistant auto-discovery working
