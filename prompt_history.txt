@@ -1472,6 +1472,56 @@ All three diagnostic entities now appear in Home Assistant under the device:
 - Status (connectivity, diagnostic section)
 
 ================================================================================
+ITERATION 12 - 2026-01-25 (Save & Reboot Button Bug Fix)
+================================================================================
+
+USER PROMPT:
+------------
+"button save&reboot seems only to reboot without saving settings before"
+
+PROBLEM:
+--------
+On the I/O Names configuration page (/config/io-names), the "Save & Reboot" button
+was not saving the form data before rebooting. Users would lose their changes.
+
+ROOT CAUSE:
+-----------
+In webserver.c config_io_names_handler(), the "Save & Reboot" button was in a
+separate HTML <form> that only posted to /reboot:
+
+    <button type="submit">Save I/O Names</button>
+    </form>
+    <form method="POST" action="/reboot">
+    <button type="submit" class="danger">Save &amp; Reboot</button>
+    </form>
+
+The "Save I/O Names" button correctly submitted to /config/io, but the
+"Save & Reboot" button was in its own form that skipped the save entirely.
+
+FIX APPLIED:
+------------
+Changed the "Save & Reboot" button to use JavaScript that:
+1. Collects form data from the I/O names form
+2. Submits it via AJAX to /config/io
+3. On success, sends a POST to /reboot
+4. On failure, shows an alert to the user
+
+New implementation:
+- Button is now type="button" with onclick="saveAndReboot()"
+- JavaScript function uses FormData and XMLHttpRequest
+- Sequential requests ensure save completes before reboot
+- Error handling for both save and reboot failures
+
+FILES MODIFIED:
+---------------
+- src/webserver.c: Fixed Save & Reboot button implementation
+
+RESULT:
+-------
+The "Save & Reboot" button now correctly saves all I/O name settings to NVS
+before triggering the device reboot.
+
+================================================================================
 ITERATION 11 - 2026-01-25 (Configurable Speed & Heat Meter Names, Name Filtering)
 ================================================================================
 
