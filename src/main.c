@@ -225,21 +225,6 @@ static inline bool edge_buffer_is_empty(edge_buffer_t *eb)
     return eb->head == eb->tail;
 }
 
-// Add edge to buffer (producer side - ISR safe with mutex)
-static bool edge_buffer_put(edge_buffer_t *eb, uint16_t duration, uint8_t level)
-{
-    if (edge_buffer_is_full(eb)) {
-        return false;  // Buffer overflow
-    }
-
-    uint32_t next_head = (eb->head + 1) % EDGE_BUFFER_SIZE;
-    eb->buffer[eb->head].duration = duration;
-    eb->buffer[eb->head].level = level;
-    eb->head = next_head;
-
-    return true;
-}
-
 // Get edge from buffer (consumer side)
 static bool edge_buffer_get(edge_buffer_t *eb, edge_t *edge)
 {
@@ -322,12 +307,8 @@ static intr_handle_t gpio_intr_handle = NULL;
  */
 static void IRAM_ATTR gpio_dedicated_isr(void *arg)
 {
-    // Clear the interrupt status for our GPIO
-    if (DL_BUS_GPIO < 32) {
-        GPIO.status_w1tc = (1ULL << DL_BUS_GPIO);
-    } else {
-        GPIO.status1_w1tc.val = (1ULL << (DL_BUS_GPIO - 32));
-    }
+    // Clear the interrupt status for our GPIO (GPIO26 is always < 32)
+    GPIO.status_w1tc = (1ULL << DL_BUS_GPIO);
 
     // Call our handler
     gpio_isr_handler(arg);
