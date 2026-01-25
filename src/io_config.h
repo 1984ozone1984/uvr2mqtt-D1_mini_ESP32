@@ -16,6 +16,7 @@
 #define NUM_SENSORS       16
 #define NUM_OUTPUTS       13
 #define NUM_SPEED_LEVELS  4
+#define NUM_HEAT_METERS   2
 #define NUM_SENSOR_TYPES  8
 
 // =============================================================================
@@ -67,6 +68,22 @@
     CONFIG_SPEED_A2_NAME, \
     CONFIG_SPEED_A6_NAME, \
     CONFIG_SPEED_A7_NAME \
+}
+
+// =============================================================================
+// Heat Meter Power Names Array
+// =============================================================================
+#define HEAT_METER_POWER_NAMES { \
+    CONFIG_HEAT_METER_1_POWER_NAME, \
+    CONFIG_HEAT_METER_2_POWER_NAME \
+}
+
+// =============================================================================
+// Heat Meter Energy Names Array
+// =============================================================================
+#define HEAT_METER_ENERGY_NAMES { \
+    CONFIG_HEAT_METER_1_ENERGY_NAME, \
+    CONFIG_HEAT_METER_2_ENERGY_NAME \
 }
 
 // =============================================================================

@@ -35,7 +35,12 @@ ESP32-based gateway that reads data from a Technische Alternative UVR1611 solar 
 - Built-in web UI for configuration (no rebuild required)
 - WiFi STA/AP mode with automatic fallback
 - Configure WiFi and MQTT settings via browser
-- Edit sensor and output names (S1-S16, A1-A13)
+- Edit all I/O names:
+  - Sensor names (S1-S16)
+  - Output names (A1-A13)
+  - Speed level names (Drehzahlstufen A1, A2, A6, A7)
+  - Heat meter names (WMZ1/WMZ2 power and energy)
+- Disable entities by setting name to `---` or empty
 - Live sensor and output status display
 - Settings stored in NVS (persist across reboots)
 - OTA firmware update via web browser
@@ -87,19 +92,42 @@ ESP32-based gateway that reads data from a Technische Alternative UVR1611 solar 
 - Configure via web browser
 - DL-Bus reading continues locally
 
-### Sensor & Output Names
+### Configuring Sensors, Outputs, Speed Levels & Heat Meters
+
+All I/O names are configurable via the web UI. **Only entities with configured names are published to MQTT and Home Assistant.** Use `---` or leave empty to disable an entity.
 
 **Via Web UI (recommended):**
-- Go to the `/config` page
-- Edit names for sensors S1-S16 and outputs A1-A13
-- Changes take effect immediately for web display
-- Reboot to update MQTT topics and Home Assistant
+1. Go to the `/config` page
+2. Scroll down to the I/O configuration section
+3. Edit names for:
+   - **Sensors S1-S16**: Temperature, flow, radiation sensors
+   - **Outputs A1-A13**: Pumps, valves, mixers
+   - **Speed Levels (Drehzahlstufen)**: Variable speed for A1, A2, A6, A7
+   - **Heat Meters (Wärmemengenzähler)**: WMZ1/WMZ2 power (kW) and energy (kWh)
+4. Click "Save I/O Names"
+5. Changes take effect immediately for web display
+6. **Reboot** to update MQTT topics and Home Assistant discovery
+
+**Name Filtering:**
+- Names must contain at least one letter or number to be published
+- Names with only `-` characters (like `---`) are disabled
+- Empty names are disabled
+- Disabled entities do not appear in Home Assistant
+
+**Example Configuration:**
+| Entity | Name | Result |
+|--------|------|--------|
+| S1 | `T.Heizkr.VL` | ✅ Published |
+| S10 | `---` | ❌ Disabled |
+| S11 | ` ` (empty) | ❌ Disabled |
+| WMZ1 Leistung | `Solar Leistung` | ✅ Published |
+| WMZ2 Energie | `---` | ❌ Disabled |
 
 **Via menuconfig (compile-time defaults):**
 ```bash
 pio run -t menuconfig
 ```
-Navigate to: "UVR1611 I/O Configuration"
+Navigate to: "UVR1611 Configuration" → "Sensor Names", "Output Names", "Speed Level Names", or "Heat Meter Names"
 
 ### OTA Firmware Update
 
@@ -134,22 +162,28 @@ pio run -t menuconfig
 uvr1611/status                          # "online" / "offline" (LWT)
 uvr1611/sensor/{sensor_name}/state      # Sensor value (median)
 uvr1611/switch/{output_name}/state      # "ON" / "OFF"
-uvr1611/sensor/heat_meter_1_power/state # Power in kW
-uvr1611/sensor/heat_meter_1_energy/state # Energy in kWh
+uvr1611/sensor/{speed_name}/state       # Speed level (% or "inactive")
+uvr1611/sensor/{hm_power_name}/state    # Heat meter power in kW
+uvr1611/sensor/{hm_energy_name}/state   # Heat meter energy in kWh
 uvr1611/system/mac                      # MAC address
 uvr1611/system/ip                       # IP address
 uvr1611/system/uptime                   # Uptime in seconds
 ```
 
+Topic names are derived from configured names (lowercase, spaces/dots replaced with underscores).
+Only entities with configured names (containing letters/numbers) are published.
+
 ## Home Assistant
 
-All entities are automatically discovered via MQTT discovery. They appear under a single device with your configured hostname:
+Entities with configured names are automatically discovered via MQTT discovery. They appear under a single device with your configured hostname:
 - Temperature sensors with proper device class
 - Binary sensors for outputs (pumps, valves)
-- Numeric sensors for speed levels
-- Power and energy sensors for heat meters
+- Numeric sensors for speed levels (Drehzahlstufen)
+- Power and energy sensors for heat meters (Wärmemengenzähler)
 - System uptime sensor
 - Diagnostic entities (IP address, MAC address, connectivity status)
+
+**Note:** Only entities with names containing letters or numbers are registered. Use `---` to hide unused sensors/outputs from Home Assistant.
 
 Change the device name by editing the hostname in the web UI and rebooting.
 

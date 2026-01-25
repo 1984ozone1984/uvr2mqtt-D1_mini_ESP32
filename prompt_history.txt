@@ -1472,3 +1472,109 @@ All three diagnostic entities now appear in Home Assistant under the device:
 - Status (connectivity, diagnostic section)
 
 ================================================================================
+ITERATION 11 - 2026-01-25 (Configurable Speed & Heat Meter Names, Name Filtering)
+================================================================================
+
+USER PROMPT:
+------------
+"Make speed level names (Drehzahlstufen), heat meter energy names, and heat meter
+power names configurable via the webserver. Only add Sensors/Outputs/Drehzahlstufen/
+Heat meter energy and heat meter power to Home Assistant MQTT discovery if a name
+is configured. Exclude names with only '-' without numbers and letters. Also only
+publish values with configured names."
+
+WHAT WAS DONE:
+--------------
+
+1. CONFIGURATION STORAGE (config_store.h/c):
+   - Added constants: CONFIG_NUM_SPEED_LEVELS (4), CONFIG_NUM_HEAT_METERS (2)
+   - Added NVS storage for speed level names (4) and heat meter names (2 power + 2 energy)
+   - Added getter/setter functions:
+     * config_get_speed_name() / config_set_speed_name()
+     * config_get_heat_meter_power_name() / config_set_heat_meter_power_name()
+     * config_get_heat_meter_energy_name() / config_set_heat_meter_energy_name()
+   - Added config_is_name_enabled() helper function:
+     * Returns true only if name contains at least one alphanumeric character
+     * Returns false for NULL, empty, or only-dashes names like "---"
+
+2. KCONFIG DEFAULTS (Kconfig.projbuild):
+   - Added "Heat Meter Names" menu with configurable defaults:
+     * HEAT_METER_1_POWER_NAME: "WMZ1 Leistung"
+     * HEAT_METER_1_ENERGY_NAME: "WMZ1 Energie"
+     * HEAT_METER_2_POWER_NAME: "WMZ2 Leistung"
+     * HEAT_METER_2_ENERGY_NAME: "WMZ2 Energie"
+
+3. I/O CONFIG (io_config.h):
+   - Added NUM_HEAT_METERS constant
+   - Added HEAT_METER_POWER_NAMES and HEAT_METER_ENERGY_NAMES macros
+
+4. WEB UI (webserver.c):
+   - Added form section for 4 speed level names (Drehzahlstufen A1, A2, A6, A7)
+   - Added form section for 4 heat meter names (WMZ1/WMZ2 power and energy)
+   - Updated form handler (config_io_handler) to process and save all new fields
+   - Increased form buffer size from 2048 to 4096 bytes
+
+5. MQTT PUBLISHING (mqtt_ha.c):
+   - All entity types now use config_is_name_enabled() to filter publishing:
+     * mqtt_ha_publish_sensors() - skip sensors without valid names
+     * mqtt_ha_publish_outputs() - skip outputs without valid names
+     * mqtt_ha_publish_speeds() - skip speed levels without valid names
+     * mqtt_ha_publish_heat_meters() - skip heat meters without valid names
+   - Immediate-on-change publishing also respects name filtering:
+     * mqtt_ha_update_output() - checks name before publishing
+     * mqtt_ha_update_speed() - checks name before publishing
+   - Heat meters now use configurable names instead of hardcoded "Heat Meter X"
+   - Speed levels now use config_get_speed_name() instead of static array
+
+6. HOME ASSISTANT DISCOVERY (mqtt_ha.c):
+   - mqtt_ha_publish_discovery() updated to filter all entity types:
+     * Only registers sensors with enabled names
+     * Only registers outputs with enabled names
+     * Only registers speed levels with enabled names
+     * Only registers heat meters with enabled names
+   - Uses configurable names for speed levels and heat meters
+
+7. DOCUMENTATION:
+   - Updated CLAUDE.md with new APIs and features
+   - Updated README.md with detailed configuration instructions
+
+NAME FILTERING LOGIC:
+---------------------
+Names are DISABLED (not published/discovered) if:
+- NULL or empty string
+- Contains only "-" characters (like "---")
+- Contains no letters (A-Z, a-z) and no digits (0-9)
+
+Example:
+| Name            | config_is_name_enabled() | Published? |
+|-----------------|--------------------------|------------|
+| "T.Heizkr.VL"   | true                     | Yes        |
+| "WMZ1 Leistung" | true                     | Yes        |
+| "---"           | false                    | No         |
+| ""              | false                    | No         |
+| "- - -"         | false                    | No         |
+
+FILES CREATED:
+--------------
+None (all features added to existing files)
+
+FILES MODIFIED:
+---------------
+- src/config_store.h: Added speed/heat meter name APIs, config_is_name_enabled()
+- src/config_store.c: Implemented storage and getter/setters (~150 lines added)
+- src/io_config.h: Added NUM_HEAT_METERS, heat meter name macros
+- src/Kconfig.projbuild: Added Heat Meter Names menu
+- src/webserver.c: Added speed/heat meter name forms (~80 lines added)
+- src/mqtt_ha.c: Name filtering for all publishing and discovery functions
+- CLAUDE.md: Updated configuration documentation
+- README.md: Added detailed I/O configuration section
+
+RESULT:
+-------
+- Speed level names are now editable via web UI
+- Heat meter power/energy names are now editable via web UI
+- Entities with "---" or empty names are not published to MQTT
+- Entities with "---" or empty names do not appear in Home Assistant
+- Users can selectively disable unused sensors/outputs/speed levels/heat meters
+
+================================================================================

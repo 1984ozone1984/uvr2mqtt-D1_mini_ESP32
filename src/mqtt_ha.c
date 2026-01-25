@@ -51,8 +51,7 @@ typedef struct {
 } heat_meter_buffer_t;
 static heat_meter_buffer_t heat_meter_buffers[NUM_HEAT_METERS] = {0};
 
-// Speed level names from Kconfig (not editable via web)
-static const char *speed_level_names[] = SPEED_LEVEL_NAMES;
+// Speed level names are now retrieved via config_get_speed_name()
 
 // Timing
 static uint32_t last_sensor_publish = 0;
@@ -321,8 +320,9 @@ void mqtt_ha_publish_sensors(void)
     bool retain = config_get_mqtt_retain_sensors();
 
     for (int i = 0; i < NUM_SENSORS; i++) {
-        // Skip unused sensors
-        if (strcmp(config_get_sensor_name(i), "---") == 0) {
+        const char *name = config_get_sensor_name(i);
+        // Skip sensors without configured names
+        if (!config_is_name_enabled(name)) {
             continue;
         }
 
@@ -334,7 +334,7 @@ void mqtt_ha_publish_sensors(void)
         float median = calculate_median(buffer);
 
         // Create topic
-        sanitize_for_topic(config_get_sensor_name(i), sanitized_name, sizeof(sanitized_name));
+        sanitize_for_topic(name, sanitized_name, sizeof(sanitized_name));
         snprintf(topic, sizeof(topic), "%s/sensor/%s/state", base_topic, sanitized_name);
 
         // Create payload
@@ -366,19 +366,20 @@ void mqtt_ha_update_output(int output_index, bool is_on)
 
     output_tracker.states[output_index] = is_on;
 
-    // Publish immediately on change
-    if (mqtt_connected && output_tracker.initialized) {
+    // Publish immediately on change (only if name is configured)
+    const char *name = config_get_output_name(output_index);
+    if (mqtt_connected && output_tracker.initialized && config_is_name_enabled(name)) {
         char topic[MQTT_TOPIC_MAX_LEN];
         char sanitized_name[32];
 
-        sanitize_for_topic(config_get_output_name(output_index), sanitized_name, sizeof(sanitized_name));
+        sanitize_for_topic(name, sanitized_name, sizeof(sanitized_name));
         snprintf(topic, sizeof(topic), "%s/switch/%s/state",
                  config_get_mqtt_base_topic(), sanitized_name);
 
         esp_mqtt_client_publish(mqtt_client, topic, is_on ? "ON" : "OFF", 0,
                                 config_get_mqtt_qos(), config_get_mqtt_retain_sensors());
 
-        ESP_LOGI(TAG, "Output %s changed to %s", config_get_output_name(output_index), is_on ? "ON" : "OFF");
+        ESP_LOGI(TAG, "Output %s changed to %s", name, is_on ? "ON" : "OFF");
     }
 
     output_tracker.initialized = true;
@@ -397,7 +398,13 @@ void mqtt_ha_publish_outputs(void)
     bool retain = config_get_mqtt_retain_sensors();
 
     for (int i = 0; i < NUM_OUTPUTS; i++) {
-        sanitize_for_topic(config_get_output_name(i), sanitized_name, sizeof(sanitized_name));
+        const char *name = config_get_output_name(i);
+        // Skip outputs without configured names
+        if (!config_is_name_enabled(name)) {
+            continue;
+        }
+
+        sanitize_for_topic(name, sanitized_name, sizeof(sanitized_name));
         snprintf(topic, sizeof(topic), "%s/switch/%s/state", base_topic, sanitized_name);
 
         esp_mqtt_client_publish(mqtt_client, topic,
@@ -428,13 +435,14 @@ void mqtt_ha_update_speed(int speed_index, int value, bool active)
     speed_tracker.values[speed_index] = value;
     speed_tracker.active[speed_index] = active;
 
-    // Publish immediately on change
-    if (mqtt_connected && speed_tracker.initialized) {
+    // Publish immediately on change (only if name is configured)
+    const char *name = config_get_speed_name(speed_index);
+    if (mqtt_connected && speed_tracker.initialized && config_is_name_enabled(name)) {
         char topic[MQTT_TOPIC_MAX_LEN];
         char payload[16];
         char sanitized_name[32];
 
-        sanitize_for_topic(speed_level_names[speed_index], sanitized_name, sizeof(sanitized_name));
+        sanitize_for_topic(name, sanitized_name, sizeof(sanitized_name));
         snprintf(topic, sizeof(topic), "%s/sensor/%s/state",
                  config_get_mqtt_base_topic(), sanitized_name);
 
@@ -447,7 +455,7 @@ void mqtt_ha_update_speed(int speed_index, int value, bool active)
         esp_mqtt_client_publish(mqtt_client, topic, payload, 0,
                                 config_get_mqtt_qos(), config_get_mqtt_retain_sensors());
 
-        ESP_LOGI(TAG, "Speed %s changed to %s", speed_level_names[speed_index], payload);
+        ESP_LOGI(TAG, "Speed %s changed to %s", name, payload);
     }
 
     speed_tracker.initialized = true;
@@ -467,7 +475,13 @@ void mqtt_ha_publish_speeds(void)
     bool retain = config_get_mqtt_retain_sensors();
 
     for (int i = 0; i < NUM_SPEED_LEVELS; i++) {
-        sanitize_for_topic(speed_level_names[i], sanitized_name, sizeof(sanitized_name));
+        const char *name = config_get_speed_name(i);
+        // Only publish if name is configured
+        if (!config_is_name_enabled(name)) {
+            continue;
+        }
+
+        sanitize_for_topic(name, sanitized_name, sizeof(sanitized_name));
         snprintf(topic, sizeof(topic), "%s/sensor/%s/state", base_topic, sanitized_name);
 
         if (speed_tracker.active[i]) {
@@ -512,6 +526,7 @@ void mqtt_ha_publish_heat_meters(void)
 
     char topic[MQTT_TOPIC_MAX_LEN];
     char payload[32];
+    char sanitized_name[32];
     const char *base_topic = config_get_mqtt_base_topic();
     uint8_t qos = config_get_mqtt_qos();
     bool retain = config_get_mqtt_retain_sensors();
@@ -545,15 +560,23 @@ void mqtt_ha_publish_heat_meters(void)
             median_energy = temp_energy[count / 2];
         }
 
-        // Publish power
-        snprintf(topic, sizeof(topic), "%s/sensor/heat_meter_%d_power/state", base_topic, i + 1);
-        snprintf(payload, sizeof(payload), "%.2f", median_power);
-        esp_mqtt_client_publish(mqtt_client, topic, payload, 0, qos, retain);
+        // Publish power (only if name is configured)
+        const char *power_name = config_get_heat_meter_power_name(i);
+        if (config_is_name_enabled(power_name)) {
+            sanitize_for_topic(power_name, sanitized_name, sizeof(sanitized_name));
+            snprintf(topic, sizeof(topic), "%s/sensor/%s/state", base_topic, sanitized_name);
+            snprintf(payload, sizeof(payload), "%.2f", median_power);
+            esp_mqtt_client_publish(mqtt_client, topic, payload, 0, qos, retain);
+        }
 
-        // Publish energy
-        snprintf(topic, sizeof(topic), "%s/sensor/heat_meter_%d_energy/state", base_topic, i + 1);
-        snprintf(payload, sizeof(payload), "%.1f", median_energy);
-        esp_mqtt_client_publish(mqtt_client, topic, payload, 0, qos, retain);
+        // Publish energy (only if name is configured)
+        const char *energy_name = config_get_heat_meter_energy_name(i);
+        if (config_is_name_enabled(energy_name)) {
+            sanitize_for_topic(energy_name, sanitized_name, sizeof(sanitized_name));
+            snprintf(topic, sizeof(topic), "%s/sensor/%s/state", base_topic, sanitized_name);
+            snprintf(payload, sizeof(payload), "%.1f", median_energy);
+            esp_mqtt_client_publish(mqtt_client, topic, payload, 0, qos, retain);
+        }
 
         // Clear buffer after publishing
         buffer->count = 0;
@@ -713,14 +736,15 @@ void mqtt_ha_publish_discovery(void)
     ESP_LOGI(TAG, "Publishing Home Assistant discovery (device_id: %s)", device_id);
 
     // ==========================================================================
-    // Temperature Sensors
+    // Temperature Sensors (only with configured names)
     // ==========================================================================
     for (int i = 0; i < NUM_SENSORS; i++) {
-        if (strcmp(config_get_sensor_name(i), "---") == 0) {
+        const char *name = config_get_sensor_name(i);
+        if (!config_is_name_enabled(name)) {
             continue;
         }
 
-        sanitize_for_topic(config_get_sensor_name(i), sanitized_name, sizeof(sanitized_name));
+        sanitize_for_topic(name, sanitized_name, sizeof(sanitized_name));
         snprintf(state_topic, sizeof(state_topic), "%s/sensor/%s/state",
                  base_topic, sanitized_name);
 
@@ -728,65 +752,77 @@ void mqtt_ha_publish_discovery(void)
         const char *device_class = "temperature";
         const char *unit = "°C";
 
-        if (strstr(config_get_sensor_name(i), "Durchfl") != NULL) {
+        if (strstr(name, "Durchfl") != NULL) {
             device_class = "";  // No device class for flow
             unit = "l/h";
         }
 
-        publish_ha_sensor_discovery(config_get_sensor_name(i), device_class, unit,
+        publish_ha_sensor_discovery(name, device_class, unit,
                                     state_topic, sanitized_name, device_id);
     }
 
     // ==========================================================================
-    // Output Binary Sensors (Pumps, Valves, etc.)
+    // Output Binary Sensors (only with configured names)
     // ==========================================================================
     for (int i = 0; i < NUM_OUTPUTS; i++) {
-        sanitize_for_topic(config_get_output_name(i), sanitized_name, sizeof(sanitized_name));
+        const char *name = config_get_output_name(i);
+        if (!config_is_name_enabled(name)) {
+            continue;
+        }
+
+        sanitize_for_topic(name, sanitized_name, sizeof(sanitized_name));
         snprintf(state_topic, sizeof(state_topic), "%s/switch/%s/state",
                  base_topic, sanitized_name);
 
         // Determine device class based on output name
         const char *device_class = "running";  // Default for pumps
-        if (strstr(config_get_output_name(i), "Ventil") != NULL ||
-            strstr(config_get_output_name(i), "Misch") != NULL) {
+        if (strstr(name, "Ventil") != NULL ||
+            strstr(name, "Misch") != NULL) {
             device_class = "opening";
         }
 
-        publish_ha_binary_sensor_discovery(config_get_output_name(i), device_class,
+        publish_ha_binary_sensor_discovery(name, device_class,
                                            state_topic, sanitized_name, device_id);
     }
 
     // ==========================================================================
-    // Speed Level Sensors
+    // Speed Level Sensors (only with configured names)
     // ==========================================================================
     for (int i = 0; i < NUM_SPEED_LEVELS; i++) {
-        sanitize_for_topic(speed_level_names[i], sanitized_name, sizeof(sanitized_name));
+        const char *name = config_get_speed_name(i);
+        if (!config_is_name_enabled(name)) {
+            continue;
+        }
+
+        sanitize_for_topic(name, sanitized_name, sizeof(sanitized_name));
         snprintf(state_topic, sizeof(state_topic), "%s/sensor/%s/state",
                  base_topic, sanitized_name);
 
-        publish_ha_sensor_discovery(speed_level_names[i], "", "%",
+        publish_ha_sensor_discovery(name, "", "%",
                                     state_topic, sanitized_name, device_id);
     }
 
     // ==========================================================================
-    // Heat Meter Sensors
+    // Heat Meter Sensors (only with configured names)
     // ==========================================================================
-    for (int i = 0; i < 2; i++) {
-        char name[32];
-
+    for (int i = 0; i < NUM_HEAT_METERS; i++) {
         // Power sensor
-        snprintf(name, sizeof(name), "Heat Meter %d Power", i + 1);
-        snprintf(state_topic, sizeof(state_topic), "%s/sensor/heat_meter_%d_power/state",
-                 base_topic, i + 1);
-        snprintf(sanitized_name, sizeof(sanitized_name), "heat_meter_%d_power", i + 1);
-        publish_ha_sensor_discovery(name, "power", "kW", state_topic, sanitized_name, device_id);
+        const char *power_name = config_get_heat_meter_power_name(i);
+        if (config_is_name_enabled(power_name)) {
+            sanitize_for_topic(power_name, sanitized_name, sizeof(sanitized_name));
+            snprintf(state_topic, sizeof(state_topic), "%s/sensor/%s/state",
+                     base_topic, sanitized_name);
+            publish_ha_sensor_discovery(power_name, "power", "kW", state_topic, sanitized_name, device_id);
+        }
 
         // Energy sensor
-        snprintf(name, sizeof(name), "Heat Meter %d Energy", i + 1);
-        snprintf(state_topic, sizeof(state_topic), "%s/sensor/heat_meter_%d_energy/state",
-                 base_topic, i + 1);
-        snprintf(sanitized_name, sizeof(sanitized_name), "heat_meter_%d_energy", i + 1);
-        publish_ha_sensor_discovery(name, "energy", "kWh", state_topic, sanitized_name, device_id);
+        const char *energy_name = config_get_heat_meter_energy_name(i);
+        if (config_is_name_enabled(energy_name)) {
+            sanitize_for_topic(energy_name, sanitized_name, sizeof(sanitized_name));
+            snprintf(state_topic, sizeof(state_topic), "%s/sensor/%s/state",
+                     base_topic, sanitized_name);
+            publish_ha_sensor_discovery(energy_name, "energy", "kWh", state_topic, sanitized_name, device_id);
+        }
     }
 
     // ==========================================================================

@@ -61,6 +61,9 @@ static const char *TAG = "CONFIG";
 // I/O name key prefixes (sensor_0 through sensor_15, output_0 through output_12)
 #define KEY_SENSOR_PREFIX       "sensor_"
 #define KEY_OUTPUT_PREFIX       "output_"
+#define KEY_SPEED_PREFIX        "speed_"
+#define KEY_HM_POWER_PREFIX     "hm_pwr_"
+#define KEY_HM_ENERGY_PREFIX    "hm_nrg_"
 
 // =============================================================================
 // Runtime Configuration Storage
@@ -75,6 +78,9 @@ typedef struct {
     char ha_discovery_prefix[CONFIG_MQTT_TOPIC_MAX_LEN];
     char sensor_names[CONFIG_NUM_SENSORS][CONFIG_IO_NAME_MAX_LEN];
     char output_names[CONFIG_NUM_OUTPUTS][CONFIG_IO_NAME_MAX_LEN];
+    char speed_names[CONFIG_NUM_SPEED_LEVELS][CONFIG_IO_NAME_MAX_LEN];
+    char heat_meter_power_names[CONFIG_NUM_HEAT_METERS][CONFIG_IO_NAME_MAX_LEN];
+    char heat_meter_energy_names[CONFIG_NUM_HEAT_METERS][CONFIG_IO_NAME_MAX_LEN];
     uint16_t interval_sensors;
     uint16_t interval_outputs;
     uint16_t interval_system;
@@ -245,6 +251,9 @@ static void load_kconfig_defaults(void)
     // I/O names from Kconfig
     const char *kconfig_sensor_names[] = SENSOR_NAMES;
     const char *kconfig_output_names[] = OUTPUT_NAMES;
+    const char *kconfig_speed_names[] = SPEED_LEVEL_NAMES;
+    const char *kconfig_hm_power_names[] = HEAT_METER_POWER_NAMES;
+    const char *kconfig_hm_energy_names[] = HEAT_METER_ENERGY_NAMES;
 
     for (int i = 0; i < CONFIG_NUM_SENSORS; i++) {
         strncpy(s_config.sensor_names[i], kconfig_sensor_names[i], CONFIG_IO_NAME_MAX_LEN - 1);
@@ -254,6 +263,18 @@ static void load_kconfig_defaults(void)
     for (int i = 0; i < CONFIG_NUM_OUTPUTS; i++) {
         strncpy(s_config.output_names[i], kconfig_output_names[i], CONFIG_IO_NAME_MAX_LEN - 1);
         s_config.output_names[i][CONFIG_IO_NAME_MAX_LEN - 1] = '\0';
+    }
+
+    for (int i = 0; i < CONFIG_NUM_SPEED_LEVELS; i++) {
+        strncpy(s_config.speed_names[i], kconfig_speed_names[i], CONFIG_IO_NAME_MAX_LEN - 1);
+        s_config.speed_names[i][CONFIG_IO_NAME_MAX_LEN - 1] = '\0';
+    }
+
+    for (int i = 0; i < CONFIG_NUM_HEAT_METERS; i++) {
+        strncpy(s_config.heat_meter_power_names[i], kconfig_hm_power_names[i], CONFIG_IO_NAME_MAX_LEN - 1);
+        s_config.heat_meter_power_names[i][CONFIG_IO_NAME_MAX_LEN - 1] = '\0';
+        strncpy(s_config.heat_meter_energy_names[i], kconfig_hm_energy_names[i], CONFIG_IO_NAME_MAX_LEN - 1);
+        s_config.heat_meter_energy_names[i][CONFIG_IO_NAME_MAX_LEN - 1] = '\0';
     }
 
     s_config.version = CONFIG_VERSION;
@@ -308,6 +329,16 @@ static void load_nvs_overrides(void)
     for (int i = 0; i < CONFIG_NUM_OUTPUTS; i++) {
         snprintf(key, sizeof(key), "%s%d", KEY_OUTPUT_PREFIX, i);
         load_string(handle, key, s_config.output_names[i], CONFIG_IO_NAME_MAX_LEN, s_config.output_names[i]);
+    }
+    for (int i = 0; i < CONFIG_NUM_SPEED_LEVELS; i++) {
+        snprintf(key, sizeof(key), "%s%d", KEY_SPEED_PREFIX, i);
+        load_string(handle, key, s_config.speed_names[i], CONFIG_IO_NAME_MAX_LEN, s_config.speed_names[i]);
+    }
+    for (int i = 0; i < CONFIG_NUM_HEAT_METERS; i++) {
+        snprintf(key, sizeof(key), "%s%d", KEY_HM_POWER_PREFIX, i);
+        load_string(handle, key, s_config.heat_meter_power_names[i], CONFIG_IO_NAME_MAX_LEN, s_config.heat_meter_power_names[i]);
+        snprintf(key, sizeof(key), "%s%d", KEY_HM_ENERGY_PREFIX, i);
+        load_string(handle, key, s_config.heat_meter_energy_names[i], CONFIG_IO_NAME_MAX_LEN, s_config.heat_meter_energy_names[i]);
     }
 
     nvs_close(handle);
@@ -828,6 +859,9 @@ esp_err_t config_reset_io_names(void)
     // Reload Kconfig defaults for I/O names
     const char *kconfig_sensor_names[] = SENSOR_NAMES;
     const char *kconfig_output_names[] = OUTPUT_NAMES;
+    const char *kconfig_speed_names[] = SPEED_LEVEL_NAMES;
+    const char *kconfig_hm_power_names[] = HEAT_METER_POWER_NAMES;
+    const char *kconfig_hm_energy_names[] = HEAT_METER_ENERGY_NAMES;
 
     nvs_handle_t handle;
     esp_err_t err = nvs_open(NVS_NAMESPACE_CONFIG, NVS_READWRITE, &handle);
@@ -853,6 +887,24 @@ esp_err_t config_reset_io_names(void)
         snprintf(key, sizeof(key), "%s%d", KEY_OUTPUT_PREFIX, i);
         nvs_erase_key(handle, key);
     }
+
+    for (int i = 0; i < CONFIG_NUM_SPEED_LEVELS; i++) {
+        strncpy(s_config.speed_names[i], kconfig_speed_names[i], CONFIG_IO_NAME_MAX_LEN - 1);
+        s_config.speed_names[i][CONFIG_IO_NAME_MAX_LEN - 1] = '\0';
+        snprintf(key, sizeof(key), "%s%d", KEY_SPEED_PREFIX, i);
+        nvs_erase_key(handle, key);
+    }
+
+    for (int i = 0; i < CONFIG_NUM_HEAT_METERS; i++) {
+        strncpy(s_config.heat_meter_power_names[i], kconfig_hm_power_names[i], CONFIG_IO_NAME_MAX_LEN - 1);
+        s_config.heat_meter_power_names[i][CONFIG_IO_NAME_MAX_LEN - 1] = '\0';
+        snprintf(key, sizeof(key), "%s%d", KEY_HM_POWER_PREFIX, i);
+        nvs_erase_key(handle, key);
+        strncpy(s_config.heat_meter_energy_names[i], kconfig_hm_energy_names[i], CONFIG_IO_NAME_MAX_LEN - 1);
+        s_config.heat_meter_energy_names[i][CONFIG_IO_NAME_MAX_LEN - 1] = '\0';
+        snprintf(key, sizeof(key), "%s%d", KEY_HM_ENERGY_PREFIX, i);
+        nvs_erase_key(handle, key);
+    }
     unlock();
 
     nvs_commit(handle);
@@ -860,6 +912,120 @@ esp_err_t config_reset_io_names(void)
 
     ESP_LOGI(TAG, "I/O names reset to Kconfig defaults");
     return ESP_OK;
+}
+
+const char *config_get_speed_name(int index)
+{
+    if (index < 0 || index >= CONFIG_NUM_SPEED_LEVELS) {
+        return "---";
+    }
+    return s_config.speed_names[index];
+}
+
+esp_err_t config_set_speed_name(int index, const char *name)
+{
+    if (index < 0 || index >= CONFIG_NUM_SPEED_LEVELS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (name == NULL || strlen(name) >= CONFIG_IO_NAME_MAX_LEN) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    lock();
+    strncpy(s_config.speed_names[index], name, CONFIG_IO_NAME_MAX_LEN - 1);
+    s_config.speed_names[index][CONFIG_IO_NAME_MAX_LEN - 1] = '\0';
+    unlock();
+
+    // Save to NVS
+    char key[16];
+    snprintf(key, sizeof(key), "%s%d", KEY_SPEED_PREFIX, index);
+    esp_err_t err = save_string(key, name);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Speed level %d name updated: %s", index + 1, name);
+    }
+    return err;
+}
+
+const char *config_get_heat_meter_power_name(int index)
+{
+    if (index < 0 || index >= CONFIG_NUM_HEAT_METERS) {
+        return "---";
+    }
+    return s_config.heat_meter_power_names[index];
+}
+
+esp_err_t config_set_heat_meter_power_name(int index, const char *name)
+{
+    if (index < 0 || index >= CONFIG_NUM_HEAT_METERS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (name == NULL || strlen(name) >= CONFIG_IO_NAME_MAX_LEN) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    lock();
+    strncpy(s_config.heat_meter_power_names[index], name, CONFIG_IO_NAME_MAX_LEN - 1);
+    s_config.heat_meter_power_names[index][CONFIG_IO_NAME_MAX_LEN - 1] = '\0';
+    unlock();
+
+    // Save to NVS
+    char key[16];
+    snprintf(key, sizeof(key), "%s%d", KEY_HM_POWER_PREFIX, index);
+    esp_err_t err = save_string(key, name);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Heat meter %d power name updated: %s", index + 1, name);
+    }
+    return err;
+}
+
+const char *config_get_heat_meter_energy_name(int index)
+{
+    if (index < 0 || index >= CONFIG_NUM_HEAT_METERS) {
+        return "---";
+    }
+    return s_config.heat_meter_energy_names[index];
+}
+
+esp_err_t config_set_heat_meter_energy_name(int index, const char *name)
+{
+    if (index < 0 || index >= CONFIG_NUM_HEAT_METERS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (name == NULL || strlen(name) >= CONFIG_IO_NAME_MAX_LEN) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    lock();
+    strncpy(s_config.heat_meter_energy_names[index], name, CONFIG_IO_NAME_MAX_LEN - 1);
+    s_config.heat_meter_energy_names[index][CONFIG_IO_NAME_MAX_LEN - 1] = '\0';
+    unlock();
+
+    // Save to NVS
+    char key[16];
+    snprintf(key, sizeof(key), "%s%d", KEY_HM_ENERGY_PREFIX, index);
+    esp_err_t err = save_string(key, name);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Heat meter %d energy name updated: %s", index + 1, name);
+    }
+    return err;
+}
+
+bool config_is_name_enabled(const char *name)
+{
+    if (name == NULL || name[0] == '\0') {
+        return false;
+    }
+
+    // Check if name contains at least one alphanumeric character
+    for (int i = 0; name[i] != '\0'; i++) {
+        char c = name[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            return true;
+        }
+    }
+
+    // Name contains only non-alphanumeric characters (like "---")
+    return false;
 }
 
 // =============================================================================

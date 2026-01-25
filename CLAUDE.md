@@ -65,6 +65,15 @@ const char *config_get_sensor_name(int index);  // 0-15 for S1-S16
 esp_err_t config_set_sensor_name(int index, const char *name);
 const char *config_get_output_name(int index);  // 0-12 for A1-A13
 esp_err_t config_set_output_name(int index, const char *name);
+const char *config_get_speed_name(int index);   // 0-3 for Drehzahlstufen
+esp_err_t config_set_speed_name(int index, const char *name);
+const char *config_get_heat_meter_power_name(int index);  // 0-1 for WMZ power
+esp_err_t config_set_heat_meter_power_name(int index, const char *name);
+const char *config_get_heat_meter_energy_name(int index); // 0-1 for WMZ energy
+esp_err_t config_set_heat_meter_energy_name(int index, const char *name);
+
+// Name validation (for MQTT filtering)
+bool config_is_name_enabled(const char *name);  // true if has alphanumeric chars
 
 // Secrets (never logged, copy to caller buffer)
 bool config_has_wifi_credentials(void);
@@ -134,7 +143,8 @@ Located in `src/Kconfig.projbuild`:
 **I/O Names (Kconfig defaults, editable via web UI):**
 - Sensor names S1-S16
 - Output names A1-A13
-- Speed level names (Kconfig only)
+- Speed level names (Drehzahlstufen A1, A2, A6, A7)
+- Heat meter names (WMZ1/WMZ2 power and energy)
 
 ## DL-Bus Protocol Details
 
@@ -157,11 +167,18 @@ uvr1611/system/uptime       -> Uptime seconds
 
 ## Home Assistant Auto-Discovery
 
-All entities are automatically discovered via MQTT with proper device grouping:
+Entities are automatically discovered via MQTT with proper device grouping.
+**Only entities with configured names are published** - use `---` or empty name to disable.
+
+**Name Filtering:**
+- Names must contain at least one alphanumeric character (letter or number)
+- Names with only `-` characters (like `---`) are disabled
+- Empty names are disabled
+- Disabled entities are not published to MQTT and not registered in HA
 
 **Sensor Entities:**
 - Temperature/flow sensors (S1-S16) with proper device_class
-- Speed level sensors (A1, A2, A6, A7)
+- Speed level sensors (Drehzahlstufen A1, A2, A6, A7)
 - Heat meter power (kW) and energy (kWh)
 - System uptime
 
@@ -191,6 +208,8 @@ The device provides a web-based configuration UI:
 - Real-time sensor and output display
 - WiFi and MQTT configuration forms
 - Sensor and output name editing (S1-S16, A1-A13)
+- Speed level name editing (Drehzahlstufen A1, A2, A6, A7)
+- Heat meter name editing (WMZ1/WMZ2 power and energy)
 - OTA firmware update with progress indicator
 - Current firmware version display
 - Settings saved to NVS (persist across reboots)

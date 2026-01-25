@@ -353,6 +353,46 @@ static esp_err_t config_handler(httpd_req_t *req)
 
     n = snprintf(p, remaining,
         "</div>"
+        "<h2 style=\"margin-top:20px;\">Speed Level Names (Drehzahlstufen)</h2>"
+        "<p class=\"info\">Names for speed levels of outputs A1, A2, A6, A7. Use '---' or empty to disable.</p>"
+        "<div class=\"grid\">");
+    p += n; remaining -= n;
+
+    const char *speed_labels[] = {"A1", "A2", "A6", "A7"};
+    for (int i = 0; i < CONFIG_NUM_SPEED_LEVELS; i++) {
+        n = snprintf(p, remaining,
+            "<div class=\"item\">"
+            "<label>Drehz %s</label>"
+            "<input type=\"text\" name=\"speed_%d\" value=\"%s\" maxlength=\"23\">"
+            "</div>",
+            speed_labels[i], i, config_get_speed_name(i));
+        p += n; remaining -= n;
+    }
+
+    n = snprintf(p, remaining,
+        "</div>"
+        "<h2 style=\"margin-top:20px;\">Heat Meter Names (Waermemengenzaehler)</h2>"
+        "<p class=\"info\">Names for heat meter power (kW) and energy (kWh). Use '---' or empty to disable.</p>"
+        "<div class=\"grid\">");
+    p += n; remaining -= n;
+
+    for (int i = 0; i < CONFIG_NUM_HEAT_METERS; i++) {
+        n = snprintf(p, remaining,
+            "<div class=\"item\">"
+            "<label>WMZ%d Leistung</label>"
+            "<input type=\"text\" name=\"hm_pwr_%d\" value=\"%s\" maxlength=\"23\">"
+            "</div>"
+            "<div class=\"item\">"
+            "<label>WMZ%d Energie</label>"
+            "<input type=\"text\" name=\"hm_nrg_%d\" value=\"%s\" maxlength=\"23\">"
+            "</div>",
+            i + 1, i, config_get_heat_meter_power_name(i),
+            i + 1, i, config_get_heat_meter_energy_name(i));
+        p += n; remaining -= n;
+    }
+
+    n = snprintf(p, remaining,
+        "</div>"
         "<button type=\"submit\">Save I/O Names</button>"
         "</form>"
         "</div>");
@@ -547,13 +587,13 @@ static esp_err_t config_mqtt_handler(httpd_req_t *req)
 
 static esp_err_t config_io_handler(httpd_req_t *req)
 {
-    // Large buffer needed for 29 I/O fields
-    char *body = malloc(2048);
+    // Large buffer needed for all I/O fields (sensors, outputs, speeds, heat meters)
+    char *body = malloc(4096);
     if (!body) {
         return config_response_page(req, "I/O Configuration", "Memory allocation failed", false);
     }
 
-    int ret = httpd_req_recv(req, body, 2047);
+    int ret = httpd_req_recv(req, body, 4095);
     if (ret <= 0) {
         free(body);
         return config_response_page(req, "I/O Configuration", "Failed to receive form data", false);
@@ -576,6 +616,26 @@ static esp_err_t config_io_handler(httpd_req_t *req)
         snprintf(key, sizeof(key), "output_%d", i);
         if (get_form_value(body, key, name, sizeof(name)) && strlen(name) > 0) {
             config_set_output_name(i, name);
+        }
+    }
+
+    // Process speed level names (Drehzahlstufen)
+    for (int i = 0; i < CONFIG_NUM_SPEED_LEVELS; i++) {
+        snprintf(key, sizeof(key), "speed_%d", i);
+        if (get_form_value(body, key, name, sizeof(name)) && strlen(name) > 0) {
+            config_set_speed_name(i, name);
+        }
+    }
+
+    // Process heat meter names
+    for (int i = 0; i < CONFIG_NUM_HEAT_METERS; i++) {
+        snprintf(key, sizeof(key), "hm_pwr_%d", i);
+        if (get_form_value(body, key, name, sizeof(name)) && strlen(name) > 0) {
+            config_set_heat_meter_power_name(i, name);
+        }
+        snprintf(key, sizeof(key), "hm_nrg_%d", i);
+        if (get_form_value(body, key, name, sizeof(name)) && strlen(name) > 0) {
+            config_set_heat_meter_energy_name(i, name);
         }
     }
 

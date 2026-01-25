@@ -40,6 +40,8 @@ extern "C" {
 // Number of I/O channels
 #define CONFIG_NUM_SENSORS              16
 #define CONFIG_NUM_OUTPUTS              13
+#define CONFIG_NUM_SPEED_LEVELS         4
+#define CONFIG_NUM_HEAT_METERS          2
 
 // Current configuration version (increment on schema changes)
 #define CONFIG_VERSION                  1
@@ -379,6 +381,59 @@ esp_err_t config_set_output_name(int index, const char *name);
  * @return ESP_OK on success
  */
 esp_err_t config_reset_io_names(void);
+
+/**
+ * Get speed level name
+ * @param index Speed level index (0-3 for A1, A2, A6, A7)
+ * @return Speed level name string (valid until next set or reboot)
+ */
+const char *config_get_speed_name(int index);
+
+/**
+ * Set speed level name
+ * @param index Speed level index (0-3)
+ * @param name New speed level name (max CONFIG_IO_NAME_MAX_LEN-1 chars)
+ * @return ESP_OK on success
+ */
+esp_err_t config_set_speed_name(int index, const char *name);
+
+/**
+ * Get heat meter power name
+ * @param index Heat meter index (0-1)
+ * @return Heat meter power name string
+ */
+const char *config_get_heat_meter_power_name(int index);
+
+/**
+ * Set heat meter power name
+ * @param index Heat meter index (0-1)
+ * @param name New name (max CONFIG_IO_NAME_MAX_LEN-1 chars)
+ * @return ESP_OK on success
+ */
+esp_err_t config_set_heat_meter_power_name(int index, const char *name);
+
+/**
+ * Get heat meter energy name
+ * @param index Heat meter index (0-1)
+ * @return Heat meter energy name string
+ */
+const char *config_get_heat_meter_energy_name(int index);
+
+/**
+ * Set heat meter energy name
+ * @param index Heat meter index (0-1)
+ * @param name New name (max CONFIG_IO_NAME_MAX_LEN-1 chars)
+ * @return ESP_OK on success
+ */
+esp_err_t config_set_heat_meter_energy_name(int index, const char *name);
+
+/**
+ * Check if a name is configured (enabled)
+ * @param name Name string to check
+ * @return true if name contains at least one alphanumeric character
+ *         false if name is NULL, empty, or only contains '-' characters
+ */
+bool config_is_name_enabled(const char *name);
 
 // =============================================================================
 // Factory Reset

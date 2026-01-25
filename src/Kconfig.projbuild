@@ -313,6 +313,32 @@ menu "UVR1611 Configuration"
                 Speed level name for output A7
     endmenu
 
+    menu "Heat Meter Names"
+        config HEAT_METER_1_POWER_NAME
+            string "Heat Meter 1 Power Name"
+            default "WMZ1 Leistung"
+            help
+                Name for heat meter 1 power sensor (kW)
+
+        config HEAT_METER_1_ENERGY_NAME
+            string "Heat Meter 1 Energy Name"
+            default "WMZ1 Energie"
+            help
+                Name for heat meter 1 energy sensor (kWh)
+
+        config HEAT_METER_2_POWER_NAME
+            string "Heat Meter 2 Power Name"
+            default "WMZ2 Leistung"
+            help
+                Name for heat meter 2 power sensor (kW)
+
+        config HEAT_METER_2_ENERGY_NAME
+            string "Heat Meter 2 Energy Name"
+            default "WMZ2 Energie"
+            help
+                Name for heat meter 2 energy sensor (kWh)
+    endmenu
+
     menu "Sensor Units"
         config UNIT_UNUSED
             string "Unit for Unused (0x00)"
