@@ -307,8 +307,12 @@ static intr_handle_t gpio_intr_handle = NULL;
  */
 static void IRAM_ATTR gpio_dedicated_isr(void *arg)
 {
-    // Clear the interrupt status for our GPIO (GPIO26 is always < 32)
+    // Clear the interrupt status for our GPIO
+#if DL_BUS_GPIO < 32
     GPIO.status_w1tc = (1ULL << DL_BUS_GPIO);
+#else
+    GPIO.status1_w1tc.val = (1ULL << (DL_BUS_GPIO - 32));
+#endif
 
     // Call our handler
     gpio_isr_handler(arg);
