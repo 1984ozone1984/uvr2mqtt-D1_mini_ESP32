@@ -76,7 +76,8 @@ static const char HTML_FOOTER[] =
 static const char HTML_NAV[] =
     "<nav>"
     "<a href=\"/\">Status</a>"
-    "<a href=\"/config\">Configuration</a>"
+    "<a href=\"/config\">Device Settings</a>"
+    "<a href=\"/config/io-names\">I/O Names</a>"
     "</nav>";
 
 // =============================================================================
@@ -250,8 +251,7 @@ static esp_err_t root_handler(httpd_req_t *req)
 
 static esp_err_t config_handler(httpd_req_t *req)
 {
-    // Large buffer for I/O names form (29 fields)
-    const size_t buf_size = 16384;
+    const size_t buf_size = 8192;
     char *response = malloc(buf_size);
     if (!response) {
         httpd_resp_send_500(req);
@@ -263,7 +263,7 @@ static esp_err_t config_handler(httpd_req_t *req)
     int n;
 
     // Header
-    n = snprintf(p, remaining, "%s%s<h1>Configuration</h1>", HTML_HEADER, HTML_NAV);
+    n = snprintf(p, remaining, "%s%s<h1>Device Settings</h1>", HTML_HEADER, HTML_NAV);
     p += n; remaining -= n;
 
     // WiFi Configuration Card
@@ -284,7 +284,7 @@ static esp_err_t config_handler(httpd_req_t *req)
     // Device Settings Card
     n = snprintf(p, remaining,
         "<div class=\"card\">"
-        "<h2>Device Settings</h2>"
+        "<h2>Hostname</h2>"
         "<form method=\"POST\" action=\"/config/hostname\">"
         "<label>Hostname</label>"
         "<input type=\"text\" name=\"hostname\" value=\"%s\" maxlength=\"31\">"
@@ -314,88 +314,6 @@ static esp_err_t config_handler(httpd_req_t *req)
         "</div>",
         config_get_mqtt_broker_uri(),
         config_get_mqtt_base_topic());
-    p += n; remaining -= n;
-
-    // I/O Names Card - Sensor Names
-    n = snprintf(p, remaining,
-        "<div class=\"card\">"
-        "<h2>Sensor Names (S1-S16)</h2>"
-        "<form method=\"POST\" action=\"/config/io\">"
-        "<p class=\"info\">Use '---' to disable a sensor. Changes affect web display immediately, reboot for MQTT.</p>"
-        "<div class=\"grid\">");
-    p += n; remaining -= n;
-
-    for (int i = 0; i < CONFIG_NUM_SENSORS; i++) {
-        n = snprintf(p, remaining,
-            "<div class=\"item\">"
-            "<label>S%d</label>"
-            "<input type=\"text\" name=\"sensor_%d\" value=\"%s\" maxlength=\"23\">"
-            "</div>",
-            i + 1, i, config_get_sensor_name(i));
-        p += n; remaining -= n;
-    }
-
-    n = snprintf(p, remaining,
-        "</div>"
-        "<h2 style=\"margin-top:20px;\">Output Names (A1-A13)</h2>"
-        "<div class=\"grid\">");
-    p += n; remaining -= n;
-
-    for (int i = 0; i < CONFIG_NUM_OUTPUTS; i++) {
-        n = snprintf(p, remaining,
-            "<div class=\"item\">"
-            "<label>A%d</label>"
-            "<input type=\"text\" name=\"output_%d\" value=\"%s\" maxlength=\"23\">"
-            "</div>",
-            i + 1, i, config_get_output_name(i));
-        p += n; remaining -= n;
-    }
-
-    n = snprintf(p, remaining,
-        "</div>"
-        "<h2 style=\"margin-top:20px;\">Speed Level Names (Drehzahlstufen)</h2>"
-        "<p class=\"info\">Names for speed levels of outputs A1, A2, A6, A7. Use '---' or empty to disable.</p>"
-        "<div class=\"grid\">");
-    p += n; remaining -= n;
-
-    const char *speed_labels[] = {"A1", "A2", "A6", "A7"};
-    for (int i = 0; i < CONFIG_NUM_SPEED_LEVELS; i++) {
-        n = snprintf(p, remaining,
-            "<div class=\"item\">"
-            "<label>Drehz %s</label>"
-            "<input type=\"text\" name=\"speed_%d\" value=\"%s\" maxlength=\"23\">"
-            "</div>",
-            speed_labels[i], i, config_get_speed_name(i));
-        p += n; remaining -= n;
-    }
-
-    n = snprintf(p, remaining,
-        "</div>"
-        "<h2 style=\"margin-top:20px;\">Heat Meter Names (Waermemengenzaehler)</h2>"
-        "<p class=\"info\">Names for heat meter power (kW) and energy (kWh). Use '---' or empty to disable.</p>"
-        "<div class=\"grid\">");
-    p += n; remaining -= n;
-
-    for (int i = 0; i < CONFIG_NUM_HEAT_METERS; i++) {
-        n = snprintf(p, remaining,
-            "<div class=\"item\">"
-            "<label>WMZ%d Leistung</label>"
-            "<input type=\"text\" name=\"hm_pwr_%d\" value=\"%s\" maxlength=\"23\">"
-            "</div>"
-            "<div class=\"item\">"
-            "<label>WMZ%d Energie</label>"
-            "<input type=\"text\" name=\"hm_nrg_%d\" value=\"%s\" maxlength=\"23\">"
-            "</div>",
-            i + 1, i, config_get_heat_meter_power_name(i),
-            i + 1, i, config_get_heat_meter_energy_name(i));
-        p += n; remaining -= n;
-    }
-
-    n = snprintf(p, remaining,
-        "</div>"
-        "<button type=\"submit\">Save I/O Names</button>"
-        "</form>"
-        "</div>");
     p += n; remaining -= n;
 
     // OTA Update Card
@@ -449,23 +367,170 @@ static esp_err_t config_handler(httpd_req_t *req)
 }
 
 // =============================================================================
+// I/O Names Configuration Page Handler
+// =============================================================================
+
+static esp_err_t config_io_names_handler(httpd_req_t *req)
+{
+    const size_t buf_size = 12288;
+    char *response = malloc(buf_size);
+    if (!response) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    char *p = response;
+    size_t remaining = buf_size;
+    int n;
+
+    // Header
+    n = snprintf(p, remaining, "%s%s<h1>I/O Names Configuration</h1>", HTML_HEADER, HTML_NAV);
+    p += n; remaining -= n;
+
+    // Info message
+    n = snprintf(p, remaining,
+        "<div class=\"card\">"
+        "<p class=\"info\">Use '---' or leave empty to disable an entity. "
+        "Disabled entities are not published to MQTT and not shown in Home Assistant.</p>"
+        "</div>");
+    p += n; remaining -= n;
+
+    // Start single form for all I/O names
+    n = snprintf(p, remaining,
+        "<form method=\"POST\" action=\"/config/io\">");
+    p += n; remaining -= n;
+
+    // Sensor Names Card
+    n = snprintf(p, remaining,
+        "<div class=\"card\">"
+        "<h2>Sensor Names (S1-S16)</h2>"
+        "<div class=\"grid\">");
+    p += n; remaining -= n;
+
+    for (int i = 0; i < CONFIG_NUM_SENSORS; i++) {
+        n = snprintf(p, remaining,
+            "<div class=\"item\">"
+            "<label>S%d</label>"
+            "<input type=\"text\" name=\"sensor_%d\" value=\"%s\" maxlength=\"23\">"
+            "</div>",
+            i + 1, i, config_get_sensor_name(i));
+        p += n; remaining -= n;
+    }
+
+    n = snprintf(p, remaining, "</div></div>");
+    p += n; remaining -= n;
+
+    // Output Names Card
+    n = snprintf(p, remaining,
+        "<div class=\"card\">"
+        "<h2>Output Names (A1-A13)</h2>"
+        "<div class=\"grid\">");
+    p += n; remaining -= n;
+
+    for (int i = 0; i < CONFIG_NUM_OUTPUTS; i++) {
+        n = snprintf(p, remaining,
+            "<div class=\"item\">"
+            "<label>A%d</label>"
+            "<input type=\"text\" name=\"output_%d\" value=\"%s\" maxlength=\"23\">"
+            "</div>",
+            i + 1, i, config_get_output_name(i));
+        p += n; remaining -= n;
+    }
+
+    n = snprintf(p, remaining, "</div></div>");
+    p += n; remaining -= n;
+
+    // Speed Level Names Card
+    n = snprintf(p, remaining,
+        "<div class=\"card\">"
+        "<h2>Speed Level Names (Drehzahlstufen)</h2>"
+        "<p class=\"info\">Speed levels for outputs A1, A2, A6, A7</p>"
+        "<div class=\"grid\">");
+    p += n; remaining -= n;
+
+    const char *speed_labels[] = {"A1", "A2", "A6", "A7"};
+    for (int i = 0; i < CONFIG_NUM_SPEED_LEVELS; i++) {
+        n = snprintf(p, remaining,
+            "<div class=\"item\">"
+            "<label>Drehz %s</label>"
+            "<input type=\"text\" name=\"speed_%d\" value=\"%s\" maxlength=\"23\">"
+            "</div>",
+            speed_labels[i], i, config_get_speed_name(i));
+        p += n; remaining -= n;
+    }
+
+    n = snprintf(p, remaining, "</div></div>");
+    p += n; remaining -= n;
+
+    // Heat Meter Names Card
+    n = snprintf(p, remaining,
+        "<div class=\"card\">"
+        "<h2>Heat Meter Names (Waermemengenzaehler)</h2>"
+        "<p class=\"info\">Power (kW) and Energy (kWh) for each heat meter</p>"
+        "<div class=\"grid\">");
+    p += n; remaining -= n;
+
+    for (int i = 0; i < CONFIG_NUM_HEAT_METERS; i++) {
+        n = snprintf(p, remaining,
+            "<div class=\"item\">"
+            "<label>WMZ%d Leistung</label>"
+            "<input type=\"text\" name=\"hm_pwr_%d\" value=\"%s\" maxlength=\"23\">"
+            "</div>"
+            "<div class=\"item\">"
+            "<label>WMZ%d Energie</label>"
+            "<input type=\"text\" name=\"hm_nrg_%d\" value=\"%s\" maxlength=\"23\">"
+            "</div>",
+            i + 1, i, config_get_heat_meter_power_name(i),
+            i + 1, i, config_get_heat_meter_energy_name(i));
+        p += n; remaining -= n;
+    }
+
+    n = snprintf(p, remaining, "</div></div>");
+    p += n; remaining -= n;
+
+    // Save and Reboot buttons card
+    n = snprintf(p, remaining,
+        "<div class=\"card\">"
+        "<button type=\"submit\">Save I/O Names</button>"
+        "</form>"
+        "<form method=\"POST\" action=\"/reboot\" style=\"display:inline;margin-left:10px;\">"
+        "<button type=\"submit\" class=\"danger\">Save &amp; Reboot</button>"
+        "</form>"
+        "<p class=\"info\" style=\"margin-top:15px;\">Changes take effect immediately for web display. "
+        "Reboot required to update MQTT topics and Home Assistant.</p>"
+        "</div>");
+    p += n; remaining -= n;
+
+    // Footer
+    snprintf(p, remaining, "%s", HTML_FOOTER);
+
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    free(response);
+
+    return ESP_OK;
+}
+
+// =============================================================================
 // Form Submission Handlers
 // =============================================================================
 
 static esp_err_t config_response_page(httpd_req_t *req, const char *title,
-                                      const char *message, bool success)
+                                      const char *message, bool success,
+                                      const char *back_url)
 {
     char response[2560];
     snprintf(response, sizeof(response),
         "%s%s<h1>%s</h1>"
         "<div class=\"card\">"
         "<div class=\"status %s\">%s</div>"
-        "<p><a href=\"/config\">Back to Configuration</a></p>"
+        "<p><a href=\"%s\">Back to Configuration</a></p>"
         "</div>%s",
         HTML_HEADER, HTML_NAV,
         title,
         success ? "ok" : "error",
         message,
+        back_url,
         HTML_FOOTER);
 
     httpd_resp_set_type(req, "text/html");
@@ -478,7 +543,7 @@ static esp_err_t config_wifi_handler(httpd_req_t *req)
     char body[256];
     int ret = httpd_req_recv(req, body, sizeof(body) - 1);
     if (ret <= 0) {
-        return config_response_page(req, "WiFi Configuration", "Failed to receive form data", false);
+        return config_response_page(req, "WiFi Configuration", "Failed to receive form data", false, "/config");
     }
     body[ret] = '\0';
 
@@ -486,11 +551,11 @@ static esp_err_t config_wifi_handler(httpd_req_t *req)
     char password[CONFIG_WIFI_PASSWORD_MAX_LEN];
 
     if (!get_form_value(body, "ssid", ssid, sizeof(ssid))) {
-        return config_response_page(req, "WiFi Configuration", "SSID is required", false);
+        return config_response_page(req, "WiFi Configuration", "SSID is required", false, "/config");
     }
 
     if (strlen(ssid) == 0) {
-        return config_response_page(req, "WiFi Configuration", "SSID cannot be empty", false);
+        return config_response_page(req, "WiFi Configuration", "SSID cannot be empty", false, "/config");
     }
 
     // Password is optional (for open networks)
@@ -507,12 +572,12 @@ static esp_err_t config_wifi_handler(httpd_req_t *req)
     memset(body, 0, sizeof(body));
 
     if (err != ESP_OK) {
-        return config_response_page(req, "WiFi Configuration", "Failed to save credentials", false);
+        return config_response_page(req, "WiFi Configuration", "Failed to save credentials", false, "/config");
     }
 
     ESP_LOGI(TAG, "WiFi credentials saved");
     return config_response_page(req, "WiFi Configuration",
-        "WiFi credentials saved. Reboot to connect with new settings.", true);
+        "WiFi credentials saved. Reboot to connect with new settings.", true, "/config");
 }
 
 static esp_err_t config_hostname_handler(httpd_req_t *req)
@@ -520,27 +585,27 @@ static esp_err_t config_hostname_handler(httpd_req_t *req)
     char body[128];
     int ret = httpd_req_recv(req, body, sizeof(body) - 1);
     if (ret <= 0) {
-        return config_response_page(req, "Hostname Configuration", "Failed to receive form data", false);
+        return config_response_page(req, "Hostname Configuration", "Failed to receive form data", false, "/config");
     }
     body[ret] = '\0';
 
     char hostname[CONFIG_HOSTNAME_MAX_LEN];
     if (!get_form_value(body, "hostname", hostname, sizeof(hostname))) {
-        return config_response_page(req, "Hostname Configuration", "Hostname is required", false);
+        return config_response_page(req, "Hostname Configuration", "Hostname is required", false, "/config");
     }
 
     if (strlen(hostname) == 0) {
-        return config_response_page(req, "Hostname Configuration", "Hostname cannot be empty", false);
+        return config_response_page(req, "Hostname Configuration", "Hostname cannot be empty", false, "/config");
     }
 
     esp_err_t err = config_set_hostname(hostname);
     if (err != ESP_OK) {
-        return config_response_page(req, "Hostname Configuration", "Failed to save hostname", false);
+        return config_response_page(req, "Hostname Configuration", "Failed to save hostname", false, "/config");
     }
 
     ESP_LOGI(TAG, "Hostname saved: %s", hostname);
     return config_response_page(req, "Hostname Configuration",
-        "Hostname saved. Reboot to apply changes.", true);
+        "Hostname saved. Reboot to apply changes.", true, "/config");
 }
 
 static esp_err_t config_mqtt_handler(httpd_req_t *req)
@@ -548,7 +613,7 @@ static esp_err_t config_mqtt_handler(httpd_req_t *req)
     char body[512];
     int ret = httpd_req_recv(req, body, sizeof(body) - 1);
     if (ret <= 0) {
-        return config_response_page(req, "MQTT Configuration", "Failed to receive form data", false);
+        return config_response_page(req, "MQTT Configuration", "Failed to receive form data", false, "/config");
     }
     body[ret] = '\0';
 
@@ -582,7 +647,7 @@ static esp_err_t config_mqtt_handler(httpd_req_t *req)
 
     ESP_LOGI(TAG, "MQTT settings saved");
     return config_response_page(req, "MQTT Configuration",
-        "MQTT settings saved. Reboot to apply changes.", true);
+        "MQTT settings saved. Reboot to apply changes.", true, "/config");
 }
 
 static esp_err_t config_io_handler(httpd_req_t *req)
@@ -590,13 +655,13 @@ static esp_err_t config_io_handler(httpd_req_t *req)
     // Large buffer needed for all I/O fields (sensors, outputs, speeds, heat meters)
     char *body = malloc(4096);
     if (!body) {
-        return config_response_page(req, "I/O Configuration", "Memory allocation failed", false);
+        return config_response_page(req, "I/O Configuration", "Memory allocation failed", false, "/config/io-names");
     }
 
     int ret = httpd_req_recv(req, body, 4095);
     if (ret <= 0) {
         free(body);
-        return config_response_page(req, "I/O Configuration", "Failed to receive form data", false);
+        return config_response_page(req, "I/O Configuration", "Failed to receive form data", false, "/config/io-names");
     }
     body[ret] = '\0';
 
@@ -644,7 +709,7 @@ static esp_err_t config_io_handler(httpd_req_t *req)
     ESP_LOGI(TAG, "I/O names saved");
     return config_response_page(req, "I/O Configuration",
         "I/O names saved. Changes take effect immediately for the web interface. "
-        "Reboot to update MQTT topics and Home Assistant.", true);
+        "Reboot to update MQTT topics and Home Assistant.", true, "/config/io-names");
 }
 
 static esp_err_t reboot_handler(httpd_req_t *req)
@@ -869,7 +934,7 @@ esp_err_t webserver_start(void)
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 10;
+    config.max_uri_handlers = 12;
     config.stack_size = 8192;
 
     ESP_LOGI(TAG, "Starting web server on port %d", config.server_port);
@@ -894,6 +959,13 @@ esp_err_t webserver_start(void)
         .handler = config_handler,
     };
     httpd_register_uri_handler(server, &config_uri);
+
+    httpd_uri_t config_io_names_uri = {
+        .uri = "/config/io-names",
+        .method = HTTP_GET,
+        .handler = config_io_names_handler,
+    };
+    httpd_register_uri_handler(server, &config_io_names_uri);
 
     httpd_uri_t config_wifi_uri = {
         .uri = "/config/wifi",
